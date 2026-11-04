@@ -1,0 +1,67 @@
+name: Build AIO Studio (VST3)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows (x64)
+            os: windows-latest
+            extra: ""
+            artifact: AIO-Studio-Windows-VST3
+          - name: macOS (Universal)
+            os: macos-latest
+            extra: -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+            artifact: AIO-Studio-macOS-VST3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DAIO_LTO=ON -DAIO_BUILD_TESTS=ON ${{ matrix.extra }}
+
+      - name: Build plugins
+        run: cmake --build build --config Release --parallel --target AIOStudio_VST3 AIOStudioInstrument_VST3
+
+      - name: Build and run tests
+        shell: bash
+        continue-on-error: true
+        run: |
+          cmake --build build --config Release --parallel --target AIOTests
+          exe="$(find build -type f \( -name AIOTests -o -name AIOTests.exe \) | head -1)"
+          echo "Running $exe"
+          "$exe"
+
+      - name: Collect VST3 bundles
+        shell: bash
+        run: |
+          mkdir -p dist
+          find build -type d -name "*.vst3" -not -path "*/dist/*" -exec cp -R {} dist/ \;
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist
+
+      - name: Attach to release (only when you push a tag like v1.0.0)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          cd dist && 7z a ../${{ matrix.artifact }}.zip . >/dev/null 2>&1 || zip -r ../${{ matrix.artifact }}.zip .
+          cd ..
+          gh release create "${GITHUB_REF_NAME}" --generate-notes 2>/dev/null || true
+          gh release upload "${GITHUB_REF_NAME}" ${{ matrix.artifact }}.zip --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

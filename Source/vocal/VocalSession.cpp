@@ -433,7 +433,7 @@ void VocalSession::doLoadState()
     const juce::int64 flacSize = in.readInt64();
     if (flacSize <= 0 || flacSize > (juce::int64) blk.getSize()) return;
     juce::MemoryBlock flac;
-    in.readIntoMemoryBlock (flac, (ssize_t) flacSize);
+    in.readIntoMemoryBlock (flac, (std::ptrdiff_t) flacSize);
     const juce::int64 noteSize = in.readInt64();
     std::vector<uint8_t> nb;
     if (noteSize > 0 && noteSize <= (juce::int64) blk.getSize())

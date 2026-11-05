@@ -2,6 +2,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "PluginDefs.h"
 #include "compose/Composer.h"
+#include "compose/Styles.h"
 
 namespace aio
 {
@@ -48,6 +49,24 @@ inline double delayDivBeats (int i)        { static const double t[7] = { 0.25, 
 
 inline juce::StringArray eqTypeChoices()   { return { "Bell", "Low Shelf", "High Shelf", "High Pass", "Low Pass", "Notch" }; }
 inline juce::StringArray satTypeChoices()  { return { "Tape", "Tube", "Soft Clip", "Hard Clip", "Fold" }; }
+inline juce::StringArray styleChoices()
+{
+    juce::StringArray a;
+    for (const auto& d : aio::styleDefs()) a.add (d.name);
+    return a;
+}
+inline juce::StringArray drumStyleChoices()
+{
+    juce::StringArray a ("By style");
+    for (int i = 0; i < aio::kNumDrumFamilies; ++i) a.add (aio::drumFamilyName (i));
+    return a;
+}
+inline juce::StringArray synthStyleChoices()
+{
+    juce::StringArray a ("By style");
+    for (int i = 0; i < aio::kNumSynthFamilies; ++i) a.add (aio::synthFamilyName (i));
+    return a;
+}
 inline juce::StringArray waveChoices()     { return { "Saw", "Square", "Triangle", "Sine" }; }
 
 inline void addF (Layout& l, const juce::String& id, const juce::String& name, float lo, float hi, float def,
@@ -191,15 +210,31 @@ inline Layout createLayout()
     addF (l, "cmpMelRests",  "Melody Rests", 0.f, 100.f, 25.f, 0.f, 1.f, "%");
     addI (l, "cmpMelVel",    "Melody Velocity", 1, 127, 100);
     addB (l, "cmpBassOn",    "Bass On", true);
-    addC (l, "cmpBassStyle", "Bass Style", { "Sustain", "8th pulse", "Octave bounce", "Syncopated", "Root + 5th" }, 0);
+    addC (l, "cmpBassStyle", "Bass Style", { "Sustain", "8th pulse", "Octave bounce", "Syncopated", "Root + 5th", "By style" }, 5);
+
+    // ---- style / drums / synth part
+    addC (l, "cmpStyle",     "Style", styleChoices(), 0);
+    addB (l, "cmpChordsOn",  "Chords On", true);
+    addB (l, "cmpUseCustom", "Use My Chords", false);
+    addB (l, "cmpDrumsOn",   "Drums On", true);
+    addC (l, "cmpDrumStyle", "Drum Pattern", drumStyleChoices(), 0);
+    addF (l, "cmpDrumBusy",  "Drum Variation", 0.f, 100.f, 50.f, 0.f, 1.f, "%");
+    addI (l, "cmpDrumVel",   "Drum Velocity", 1, 127, 100);
+    addB (l, "cmpSynOn",     "Synth Part On", true);
+    addC (l, "cmpSynStyle",  "Synth Pattern", synthStyleChoices(), 0);
+    addI (l, "cmpSynOct",    "Synth Octave", 3, 7, 5);
+    addI (l, "cmpSynVel",    "Synth Velocity", 1, 127, 80);
 
     // ---- built-in preview synth ----
     addC (l, "synWaveChord", "Chords Wave", waveChoices(), 0);
     addC (l, "synWaveMel",   "Melody Wave", waveChoices(), 1);
     addC (l, "synWaveBass",  "Bass Wave", waveChoices(), 0);
+    addC (l, "synWaveSyn",   "Synth Part Wave", waveChoices(), 1);
     addF (l, "synLevelChord","Chords Level", 0.f, 100.f, 55.f, 0.f, 1.f, "%");
     addF (l, "synLevelMel",  "Melody Level", 0.f, 100.f, 55.f, 0.f, 1.f, "%");
     addF (l, "synLevelBass", "Bass Level", 0.f, 100.f, 65.f, 0.f, 1.f, "%");
+    addF (l, "synLevelSyn",  "Synth Part Level", 0.f, 100.f, 45.f, 0.f, 1.f, "%");
+    addF (l, "synLevelDrum", "Drums Level", 0.f, 100.f, 70.f, 0.f, 1.f, "%");
     addF (l, "synCutoff",    "Synth Cutoff", 200.f, 20000.f, 7000.f, 2000.f, 0.f, "Hz");
     addF (l, "synAttack",    "Synth Attack", 1.f, 2000.f, 6.f, 80.f, 1.f, "ms");
     addF (l, "synRelease",   "Synth Release", 5.f, 4000.f, 250.f, 400.f, 1.f, "ms");

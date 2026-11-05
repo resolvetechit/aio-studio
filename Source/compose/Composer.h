@@ -3,7 +3,7 @@
 
 namespace aio
 {
-enum Part { PartChords = 0, PartMelody = 1, PartBass = 2 };
+enum Part { PartChords = 0, PartMelody = 1, PartBass = 2, PartDrums = 3, PartSynth = 4, kNumParts = 5 };
 
 struct NoteEvent
 {
@@ -17,6 +17,15 @@ struct ChordInfo
     std::string name;
     int rootPc = 0;
     std::vector<int> pcs;
+};
+
+// A chord picked by hand (palette / timeline). Intervals are semitones above the root.
+struct CustomChord
+{
+    int rootPc = 0;
+    std::vector<int> iv;
+    std::string name;
+    double len = 4.0;
 };
 
 struct Pattern
@@ -42,7 +51,16 @@ struct ComposeSettings
     bool bassOn = true;
     int  bassStyle = 0;
 
-    uint32_t chordSeed = 1, melodySeed = 1;
+    uint32_t chordSeed = 1, melodySeed = 1, bassSeed = 1, drumSeed = 1, synthSeed = 1;
+
+    // ---- style / tempo driven parts
+    int    style = 0;                 // index into styleDefs()
+    double bpm = 120.0;               // host tempo (only its "feel class" influences generation)
+    bool   chordsOn = true;
+    bool   drumsOn = true;  int drumFamily = 0;  float drumBusy = 0.5f;  int drumVel = 100;   // drumFamily 0 = by style
+    bool   synthOn = true;  int synthFamily = 0; int synthOct = 5;       int synthVel = 80;   // synthFamily 0 = by style
+    bool   useCustomChords = false;
+    std::vector<CustomChord> customChords;
 };
 
 inline int barsFromIndex (int i)        { static const int t[4] = { 2, 4, 8, 16 }; return t[std::clamp (i, 0, 3)]; }

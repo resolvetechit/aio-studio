@@ -142,12 +142,49 @@ ComposeSettings AIOProcessor::readComposeSettings() const
     s.bassStyle = (int) f ("cmpBassStyle");
     s.chordSeed = chordSeed.load();
     s.melodySeed = melodySeed.load();
+    s.bassSeed = bassSeed.load();
+    s.drumSeed = drumSeed.load();
+    s.synthSeed = synthSeed.load();
+
+    s.style = (int) f ("cmpStyle");
+    s.bpm = lastBpm.load();
+    s.chordsOn = f ("cmpChordsOn") > 0.5f;
+    s.drumsOn = f ("cmpDrumsOn") > 0.5f;
+    s.drumFamily = (int) f ("cmpDrumStyle");
+    s.drumBusy = f ("cmpDrumBusy") * 0.01f;
+    s.drumVel = (int) f ("cmpDrumVel");
+    s.synthOn = f ("cmpSynOn") > 0.5f;
+    s.synthFamily = (int) f ("cmpSynStyle");
+    s.synthOct = (int) f ("cmpSynOct");
+    s.synthVel = (int) f ("cmpSynVel");
+    s.useCustomChords = f ("cmpUseCustom") > 0.5f;
+    s.customChords = customChords;
     return s;
 }
 
 void AIOProcessor::regeneratePattern()
 {
-    auto p = std::make_shared<const Pattern> (generatePattern (readComposeSettings()));
+    const auto settings = readComposeSettings();
+    Pattern gen = generatePattern (settings);
+    const bool on[5] = { settings.chordsOn, settings.melodyOn, settings.bassOn, settings.drumsOn, settings.synthOn };
+    bool touched = false;
+    for (int part = 0; part < kNumParts; ++part)
+    {
+        if (! partLocked[(size_t) part] && on[part]) continue;
+        gen.notes.erase (std::remove_if (gen.notes.begin(), gen.notes.end(), [part] (const NoteEvent& n) { return n.part == part; }), gen.notes.end());
+        touched = true;
+        if (! on[part] || ! partLocked[(size_t) part]) continue;
+        for (auto n : lockedNotes[(size_t) part])
+        {
+            if (n.start >= gen.lengthBeats - 1e-6) continue;
+            n.len = std::max (0.03, std::min (n.len, gen.lengthBeats - n.start));
+            n.part = part;
+            gen.notes.push_back (n);
+        }
+    }
+    if (touched)
+        std::stable_sort (gen.notes.begin(), gen.notes.end(), [] (const NoteEvent& a, const NoteEvent& b) { return a.start < b.start; });
+    auto p = std::make_shared<const Pattern> (std::move (gen));
     ring[(size_t) ringPos] = p;
     ringPos = (ringPos + 1) % (int) ring.size();
     uiPattern = p;
@@ -169,6 +206,146 @@ void AIOProcessor::rebuildSingTrack()
 
 void AIOProcessor::newChordSeed()  { chordSeed  = (uint32_t) juce::Random::getSystemRandom().nextInt (1000000) + 1; regeneratePattern(); }
 void AIOProcessor::newMelodySeed() { melodySeed = (uint32_t) juce::Random::getSystemRandom().nextInt (1000000) + 1; regeneratePattern(); }
+
+// ------------------------------------------------------------------------------------------------
+// Style, suggestions, hand editing
+// ------------------------------------------------------------------------------------------------
+void AIOProcessor::applyStyleDefaults()
+{
+    const auto& d = styleDefs()[(size_t) std::clamp ((int) f ("cmpStyle"), 0, numStyles() - 1)];
+    setParam ("cmpScale", (float) d.scale);
+    setParam ("cmpProg", (float) d.prog[0]);
+    setParam ("cmpRhythm", (float) d.chordRhythm);
+    setParam ("cmpChordKind", (float) d.chordKind);
+    setParam ("cmpVoicing", (float) d.voicing);
+    setParam ("cmpMelStyle", (float) d.melodyStyle);
+    setParam ("cmpMelDensity", d.melodyDensity * 100.f);
+    setParam ("cmpMelRests", d.melodyRests * 100.f);
+    setParam ("cmpSwing", d.swing * 100.f);
+    setParam ("cmpBassStyle", 5.f);
+    setParam ("cmpDrumStyle", 0.f);
+    setParam ("cmpSynStyle", 0.f);
+    setParam ("cmpUseCustom", 0.f);
+    auto& rnd = juce::Random::getSystemRandom();
+    for (int part = 0; part < kNumParts; ++part)
+    {
+        seedOf (part) = (uint32_t) rnd.nextInt (1000000) + 1;
+        seedHist[(size_t) part] = {};
+        partLocked[(size_t) part] = false;
+    }
+    regeneratePattern();
+}
+
+void AIOProcessor::suggestPart (int part, int dir)
+{
+    part = std::clamp (part, 0, kNumParts - 1);
+    partLocked[(size_t) part] = false;
+
+    if (part == PartChords)
+    {
+        // cycle through the style's favourite progressions, then the two random generators
+        const auto& d = styleDefs()[(size_t) std::clamp ((int) f ("cmpStyle"), 0, numStyles() - 1)];
+        const int list[5] = { d.prog[0], d.prog[1], d.prog[2], (int) progDefs().size(), (int) progDefs().size() + 1 };
+        int cur = -1;
+        const int now = (int) f ("cmpProg");
+        for (int i = 0; i < 5; ++i) if (list[i] == now) cur = i;
+        int next = cur < 0 ? 0 : (cur + (dir >= 0 ? 1 : 4)) % 5;
+        setParam ("cmpProg", (float) list[next]);
+        setParam ("cmpUseCustom", 0.f);
+        chordSeed = (uint32_t) juce::Random::getSystemRandom().nextInt (1000000) + 1;
+        regeneratePattern();
+        return;
+    }
+
+    auto& h = seedHist[(size_t) part];
+    auto& seed = seedOf (part);
+    if (h.pos < 0) { h.seeds = { seed.load() }; h.pos = 0; }
+    if (dir >= 0)
+    {
+        if (h.pos + 1 < (int) h.seeds.size()) ++h.pos;
+        else
+        {
+            h.seeds.push_back ((uint32_t) juce::Random::getSystemRandom().nextInt (1000000) + 1);
+            if (h.seeds.size() > 32) h.seeds.erase (h.seeds.begin());
+            h.pos = (int) h.seeds.size() - 1;
+        }
+    }
+    else if (h.pos > 0) --h.pos;
+    seed = h.seeds[(size_t) h.pos];
+    regeneratePattern();
+}
+
+void AIOProcessor::unlockPart (int part)
+{
+    if (part < 0 || part >= kNumParts) return;
+    partLocked[(size_t) part] = false;
+    regeneratePattern();
+}
+
+std::vector<NoteEvent> AIOProcessor::getPartNotes (int part) const
+{
+    std::vector<NoteEvent> v;
+    if (uiPattern) for (const auto& n : uiPattern->notes) if (n.part == part) v.push_back (n);
+    return v;
+}
+
+void AIOProcessor::setPartNotes (int part, std::vector<NoteEvent> notes)
+{
+    if (part < 0 || part >= kNumParts) return;
+    for (auto& n : notes) n.part = part;
+    std::stable_sort (notes.begin(), notes.end(), [] (const NoteEvent& a, const NoteEvent& b) { return a.start < b.start; });
+    lockedNotes[(size_t) part] = std::move (notes);
+    partLocked[(size_t) part] = true;
+    regeneratePattern();
+}
+
+void AIOProcessor::addCustomChord (const Chord& c)
+{
+    customChords.push_back (toCustom (c, chordLenFromIndex ((int) f ("cmpChordLen"))));
+    setParam ("cmpUseCustom", 1.f);
+    partLocked[(size_t) PartChords] = false;
+    regeneratePattern();
+}
+
+void AIOProcessor::setCustomChords (std::vector<CustomChord> v)
+{
+    customChords = std::move (v);
+    if (customChords.empty()) setParam ("cmpUseCustom", 0.f);
+    regeneratePattern();
+}
+
+void AIOProcessor::clearCustomChords()
+{
+    customChords.clear();
+    setParam ("cmpUseCustom", 0.f);
+    regeneratePattern();
+}
+
+int AIOProcessor::harmoniseMelody()
+{
+    auto mel = getPartNotes (PartMelody);
+    if (mel.empty() || ! uiPattern) return 0;
+    auto chords = aio::harmoniseMelody (mel, uiPattern->lengthBeats, chordLenFromIndex ((int) f ("cmpChordLen")),
+                                        (int) f ("cmpKey"), (int) f ("cmpScale"), (int) f ("cmpChordKind"));
+    if (chords.empty()) return 0;
+    // freeze the melody first, otherwise it would be regenerated around the new chords
+    lockedNotes[(size_t) PartMelody] = mel;
+    partLocked[(size_t) PartMelody] = true;
+    partLocked[(size_t) PartChords] = false;
+    customChords = std::move (chords);
+    setParam ("cmpUseCustom", 1.f);
+    regeneratePattern();
+    return (int) customChords.size();
+}
+
+void AIOProcessor::audition (int part, int note, int vel, int lenMs)
+{
+    if (audFifo.getFreeSpace() < 1) return;
+    int s1, n1, s2, n2;
+    audFifo.prepareToWrite (1, s1, n1, s2, n2);
+    audData[(size_t) (n1 > 0 ? s1 : s2)] = { part, note, vel, lenMs };
+    audFifo.finishedWrite (1);
+}
 
 void AIOProcessor::parameterChanged (const juce::String& id, float)
 {
@@ -244,11 +421,11 @@ void AIOProcessor::releaseAllNotes (juce::MidiBuffer& midi, int sample)
 {
     synth.allNotesOff();
 #if JucePlugin_ProducesMidiOutput
-    for (int part = 0; part < 3; ++part)
+    for (int part = 0; part < 5; ++part)
         for (int n = 0; n < 128; ++n)
             if (outActive[part][n])
             {
-                midi.addEvent (juce::MidiMessage::noteOff (part + 1, n), sample);
+                midi.addEvent (juce::MidiMessage::noteOff (midiChannelForPart (part), n), sample);
                 outActive[part][n] = false;
             }
 #else
@@ -347,6 +524,11 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
             if (hostPlaying) hostBeat = *pos->getPpqPosition();
         }
     lastBpm.store (bpm);
+    {
+        // the generators only see the tempo "feel"; regenerate when it changes class
+        const int fk = tempoFeelFor ((int) f ("cmpStyle"), bpm).key();
+        if (lastFeelKey.exchange (fk) != fk) { patternDirty = true; triggerAsyncUpdate(); }
+    }
 
     // ---------------------------------------------------------------- parameters, once per block
     const ChainParams cpFull = readChainParams (bpm);
@@ -408,8 +590,9 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
         releaseAllNotes (midi, 0);
 
     SynthParams sp;
-    sp.wave[0] = (int) f ("synWaveChord"); sp.wave[1] = (int) f ("synWaveMel"); sp.wave[2] = (int) f ("synWaveBass");
+    sp.wave[0] = (int) f ("synWaveChord"); sp.wave[1] = (int) f ("synWaveMel"); sp.wave[2] = (int) f ("synWaveBass"); sp.wave[4] = (int) f ("synWaveSyn");
     sp.level[0] = f ("synLevelChord") * 0.01f; sp.level[1] = f ("synLevelMel") * 0.01f; sp.level[2] = f ("synLevelBass") * 0.01f;
+    sp.level[3] = f ("synLevelDrum") * 0.01f; sp.level[4] = f ("synLevelSyn") * 0.01f;
     if (tx.singRun) sp.level[1] = 0.f;                       // the guide tone replaces the synth melody while singing
     sp.cutoffHz = f ("synCutoff"); sp.attackMs = f ("synAttack"); sp.releaseMs = f ("synRelease");
     synth.setParams (sp);
@@ -530,12 +713,12 @@ void AIOProcessor::processChunk (float* l, float* r, int n, int chunkOffset, con
                 for (int i = 0; i < cnt; ++i)
                 {
                     const auto& e = evBuf[(size_t) i];
-                    const int part = std::clamp (e.part, 0, 2);
+                    const int part = std::clamp (e.part, 0, 4);
                     if (e.on)
                     {
                         synth.noteOn (part, e.note, e.vel);
 #if JucePlugin_ProducesMidiOutput
-                        midi.addEvent (juce::MidiMessage::noteOn (part + 1, e.note, (juce::uint8) e.vel), chunkOffset + e.sample);
+                        midi.addEvent (juce::MidiMessage::noteOn (midiChannelForPart (part), e.note, (juce::uint8) e.vel), chunkOffset + e.sample);
                         outActive[part][e.note] = true;
 #endif
                     }
@@ -543,13 +726,30 @@ void AIOProcessor::processChunk (float* l, float* r, int n, int chunkOffset, con
                     {
                         synth.noteOff (part, e.note);
 #if JucePlugin_ProducesMidiOutput
-                        midi.addEvent (juce::MidiMessage::noteOff (part + 1, e.note), chunkOffset + e.sample);
+                        midi.addEvent (juce::MidiMessage::noteOff (midiChannelForPart (part), e.note), chunkOffset + e.sample);
                         outActive[part][e.note] = false;
 #endif
                     }
                 }
             }
         juce::ignoreUnused (midi, chunkOffset);
+
+        // ---- notes auditioned from the editor (palette / grid clicks)
+        for (int k = audFifo.getNumReady(); k > 0; --k)
+        {
+            int s1, n1, s2, n2;
+            audFifo.prepareToRead (1, s1, n1, s2, n2);
+            const Aud a = audData[(size_t) (n1 > 0 ? s1 : s2)];
+            audFifo.finishedRead (1);
+            const int part = std::clamp (a.part, 0, 4);
+            if (a.lenMs < 0) { synth.noteOff (part, a.note); continue; }
+            synth.noteOn (part, a.note, a.vel);
+            if (a.lenMs > 0)
+                for (auto& o : audOff)
+                    if (! o.used) { o = { part, a.note, (int) (a.lenMs * 0.001 * currentSampleRate), true }; break; }
+        }
+        for (auto& o : audOff)
+            if (o.used && (o.left -= n) <= 0) { synth.noteOff (o.part, o.note); o.used = false; }
 
         {
             float* sl = synthBuf.getWritePointer (0);
@@ -677,7 +877,7 @@ juce::String AIOProcessor::importSingMidi (const juce::File& file)
 
 juce::File AIOProcessor::makeTempMidiFile() const
 {
-    auto f = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("AIO Studio Chords + Melody.mid");
+    auto f = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("AIO Studio Pattern.mid");
     writeMidiFile (f);
     return f;
 }
@@ -691,33 +891,42 @@ juce::Result AIOProcessor::writeMidiFile (const juce::File& file) const
     juce::MidiFile mf;
     mf.setTicksPerQuarterNote (tpq);
 
-    static const char* names[3] = { "Chords", "Melody", "Bass" };
-    for (int part = 0; part < 3; ++part)
+    {   // conductor track: tempo + time signature
+        juce::MidiMessageSequence seq;
+        auto tempo = juce::MidiMessage::tempoMetaEvent ((int) std::lround (60000000.0 / bpm));
+        tempo.setTimeStamp (0);
+        seq.addEvent (tempo);
+        auto ts = juce::MidiMessage::timeSignatureMetaEvent (4, 4);
+        ts.setTimeStamp (0);
+        seq.addEvent (ts);
+        auto nm = juce::MidiMessage::textMetaEvent (3, "AIO Studio");
+        nm.setTimeStamp (0);
+        seq.addEvent (nm);
+        mf.addTrack (seq);
+    }
+
+    static const char* names[5] = { "Chords", "Melody", "Bass", "Drums", "Synth" };
+    for (int part = 0; part < kNumParts; ++part)
     {
         juce::MidiMessageSequence seq;
-        if (part == 0)
-        {
-            auto tempo = juce::MidiMessage::tempoMetaEvent ((int) std::lround (60000000.0 / bpm));
-            tempo.setTimeStamp (0);
-            seq.addEvent (tempo);
-            auto ts = juce::MidiMessage::timeSignatureMetaEvent (4, 4);
-            ts.setTimeStamp (0);
-            seq.addEvent (ts);
-        }
         auto nm = juce::MidiMessage::textMetaEvent (3, names[part]);
         nm.setTimeStamp (0);
         seq.addEvent (nm);
 
+        int count = 0;
+        const int ch = midiChannelForPart (part);
         for (const auto& n : uiPattern->notes)
         {
             if (n.part != part) continue;
-            auto on = juce::MidiMessage::noteOn (part + 1, n.pitch, (juce::uint8) n.vel);
+            auto on = juce::MidiMessage::noteOn (ch, n.pitch, (juce::uint8) n.vel);
             on.setTimeStamp (n.start * tpq);
-            auto off = juce::MidiMessage::noteOff (part + 1, n.pitch);
+            auto off = juce::MidiMessage::noteOff (ch, n.pitch);
             off.setTimeStamp ((n.start + n.len) * tpq);
             seq.addEvent (on);
             seq.addEvent (off);
+            ++count;
         }
+        if (count == 0) continue;
         seq.sort();
         seq.updateMatchedPairs();
         mf.addTrack (seq);
@@ -747,7 +956,14 @@ void AIOProcessor::getStateInformation (juce::MemoryBlock& dest)
     auto state = apvts.copyState();
     state.setProperty ("chordSeed", (int) chordSeed.load(), nullptr);
     state.setProperty ("melodySeed", (int) melodySeed.load(), nullptr);
+    state.setProperty ("bassSeed", (int) bassSeed.load(), nullptr);
+    state.setProperty ("drumSeed", (int) drumSeed.load(), nullptr);
+    state.setProperty ("synthSeed", (int) synthSeed.load(), nullptr);
     state.setProperty ("program", currentProgram, nullptr);
+    state.setProperty ("myChords", juce::String (serializeChords (customChords)), nullptr);
+    for (int part = 0; part < kNumParts; ++part)
+        if (partLocked[(size_t) part])
+            state.setProperty ("lockedNotes" + juce::String (part), juce::String (serializeNotes (lockedNotes[(size_t) part])), nullptr);
     if (importedTrack && ! importedTrack->empty())
     {
         state.setProperty ("singNotes", juce::String (serializeTrack (*importedTrack)), nullptr);
@@ -764,6 +980,18 @@ void AIOProcessor::setStateInformation (const void* data, int size)
             auto vt = juce::ValueTree::fromXml (*xml);
             chordSeed  = (uint32_t) (int) vt.getProperty ("chordSeed", (int) chordSeed.load());
             melodySeed = (uint32_t) (int) vt.getProperty ("melodySeed", (int) melodySeed.load());
+            bassSeed   = (uint32_t) (int) vt.getProperty ("bassSeed", (int) bassSeed.load());
+            drumSeed   = (uint32_t) (int) vt.getProperty ("drumSeed", (int) drumSeed.load());
+            synthSeed  = (uint32_t) (int) vt.getProperty ("synthSeed", (int) synthSeed.load());
+            customChords = deserializeChords (vt.getProperty ("myChords", juce::String()).toString().toStdString());
+            for (int part = 0; part < kNumParts; ++part)
+            {
+                const auto key = "lockedNotes" + juce::String (part);
+                partLocked[(size_t) part] = vt.hasProperty (key);
+                lockedNotes[(size_t) part] = vt.hasProperty (key) ? deserializeNotes (vt.getProperty (key).toString().toStdString(), part)
+                                                                  : std::vector<NoteEvent>();
+                seedHist[(size_t) part] = {};
+            }
             currentProgram = (int) vt.getProperty ("program", 0);
             const auto notes = vt.getProperty ("singNotes", juce::String()).toString();
             if (notes.isNotEmpty())

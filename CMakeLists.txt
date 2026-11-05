@@ -30,6 +30,7 @@ set(AIO_SOURCES
     Source/PluginEditor.cpp
     Source/Presets.cpp
     Source/compose/Composer.cpp
+    Source/compose/Styles.cpp
     Source/master/MasterEngine.cpp
     Source/master/MasterSession.cpp
     Source/sing/Sing.cpp)

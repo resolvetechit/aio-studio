@@ -1,12 +1,15 @@
 // Offline test runner for the DSP modules, the chord / melody generator and the processor as a whole.
 #include "PluginProcessor.h"
 #include "compose/Composer.h"
+#include "compose/Styles.h"
 #include "PluginEditor.h"
+#include "ui/ComposeUI.h"
 #include <cstdio>
 #include <random>
 #include <functional>
 #include <chrono>
 #include <complex>
+#include <set>
 
 using namespace aio;
 
@@ -151,7 +154,7 @@ static void testComposer()
     // voice leading: smooth should move less than root-position-everywhere
     auto movement = [] (bool smooth)
     {
-        ComposeSettings s; s.progression = 0; s.chordRhythm = 0; s.smoothVoicing = smooth; s.melodyOn = false; s.bassOn = false; s.humanize = 0;
+        ComposeSettings s; s.progression = 0; s.chordRhythm = 0; s.smoothVoicing = smooth; s.melodyOn = false; s.bassOn = false; s.drumsOn = false; s.synthOn = false; s.humanize = 0;
         auto p = generatePattern (s);
         std::vector<std::vector<int>> by (p.chords.size());
         for (auto& n : p.notes) for (size_t i = 0; i < p.chords.size(); ++i) if (n.start >= p.chords[i].start - 1e-6 && n.start < p.chords[i].start + p.chords[i].len) by[i].push_back (n.pitch);
@@ -419,7 +422,7 @@ static void testProcessor()
     CHECK (p2.writeMidiFile (f).wasOk() && f.getSize() > 50, "MIDI export wrote %lld bytes", (long long) f.getSize());
     juce::MidiFile mf;
     juce::FileInputStream in (f);
-    CHECK (mf.readFrom (in) && mf.getNumTracks() == 3, "exported file re-reads as 3 tracks");
+    CHECK (mf.readFrom (in) && mf.getNumTracks() == 6, "exported file re-reads as 6 tracks (tempo + 5 parts, got %d)", mf.getNumTracks());
     int notes = 0;
     for (int t = 0; t < mf.getNumTracks(); ++t)
         for (int i = 0; i < mf.getTrack (t)->getNumEvents(); ++i) if (mf.getTrack (t)->getEventPointer (i)->message.isNoteOn()) ++notes;
@@ -1045,10 +1048,20 @@ static void snapshots (const juce::File& dir)
         pump (60);
     }
 
-    const char* names[8] = { "tune", "eq", "dynamics", "space", "compose", "master", "voice", "sing" };
-    for (int t = 0; t < 8; ++t)
+    // a populated Compose tab: House style, my own chords, a hand-edited drum cell
+    set ("cmpStyle", 8); proc.applyStyleDefaults();
     {
-        ed.showTab (t);
+        const auto pal = buildPalette (0, 1, Seventh);
+        for (int d : { 0, 5, 2, 6 }) proc.addCustomChord (pal[(size_t) d].chord);
+    }
+    set ("cmpOn", 1); proc.previewPlaying = true;
+    for (int k = 0; k < 40; ++k) proc.processBlock (buf, midi);
+
+    const char* names[9] = { "tune", "eq", "dynamics", "space", "compose", "master", "voice", "sing", "compose_settings" };
+    for (int t = 0; t < 9; ++t)
+    {
+        ed.showTab (t == 8 ? 4 : t);
+        ed.setComposeView (t == 8 ? 1 : 0);
         for (int k = 0; k < 8; ++k) { proc.processBlock (buf, midi); }
         pump (120);
         auto img = ed.createComponentSnapshot (ed.getLocalBounds(), true, 1.0f);
@@ -1060,6 +1073,427 @@ static void snapshots (const juce::File& dir)
     }
 }
 
+
+// ---------------------------------------------------------------------------------------------
+static int countPart (const Pattern& p, int part) { int c = 0; for (auto& n : p.notes) if (n.part == part) ++c; return c; }
+
+static void testStyles()
+{
+    std::printf ("\n== styles, drums, tempo feel, palette ==\n");
+
+    // every style makes a complete, in-range arrangement at its own tempo
+    bool allOk = true; std::string bad;
+    for (int st = 0; st < numStyles(); ++st)
+    {
+        const auto& d = styleDefs()[(size_t) st];
+        ComposeSettings s; s.style = st; s.bpm = 0.5 * (d.bpmLo + d.bpmHi); s.scale = d.scale; s.progression = d.prog[0];
+        s.chordRhythm = d.chordRhythm; s.chordKind = d.chordKind; s.bassStyle = 5; s.bars = 2;   // 8 bars
+        const auto p = generatePattern (s);
+        bool ok = countPart (p, PartChords) > 0 && countPart (p, PartMelody) > 0 && countPart (p, PartBass) > 0
+               && countPart (p, PartDrums) > 0 && countPart (p, PartSynth) > 0;
+        for (auto& n : p.notes)
+        {
+            ok &= n.start >= 0 && n.start < p.lengthBeats && n.len > 0 && n.start + n.len <= p.lengthBeats + 1e-6;
+            ok &= n.pitch >= 0 && n.pitch < 128 && n.vel >= 1 && n.vel <= 127;
+            if (n.part == PartBass) ok &= n.pitch >= 24 && n.pitch <= 60;
+            if (n.part == PartDrums) ok &= n.pitch >= 35 && n.pitch <= 51;
+        }
+        if (! ok) { allOk = false; bad += std::string (d.name) + " "; }
+    }
+    CHECK (allOk, "all %d styles generate chords, melody, bass, drums and synth within range %s", numStyles(), bad.c_str());
+
+    // drum families have their signature
+    auto bar0 = [] (int fam, int lane, double busy, double bpm, int style)
+    {
+        ComposeSettings s; s.style = style; s.bpm = bpm; s.drumFamily = fam + 1; s.drumBusy = (float) busy; s.bars = 1; s.humanize = 0; s.swing = 0;
+        s.melodyOn = false; s.bassOn = false; s.synthOn = false; s.chordsOn = false;
+        const auto p = generatePattern (s);
+        std::vector<int> steps;
+        for (auto& n : p.notes) if (n.part == PartDrums && n.start < 4.0 - 1e-6 && drumLaneForNote (n.pitch) == lane) steps.push_back ((int) std::lround (n.start / 0.25));
+        std::sort (steps.begin(), steps.end());
+        return steps;
+    };
+    {
+        const auto k = bar0 (DrumFourFloor, 0, 0.0, 124, 8);
+        CHECK (k == std::vector<int> ({ 0, 4, 8, 12 }), "house kick is four on the floor (%zu hits)", k.size());
+        const auto c = bar0 (DrumFourFloor, 2, 0.0, 124, 8);
+        CHECK (c == std::vector<int> ({ 4, 12 }), "house clap sits on 2 and 4");
+        const auto o = bar0 (DrumFourFloor, 4, 0.0, 124, 8);
+        CHECK (o == std::vector<int> ({ 2, 6, 10, 14 }), "house open hats are on the off-beats");
+        const auto rk = bar0 (DrumReggae, 0, 0.0, 80, 15);
+        CHECK (rk == std::vector<int> ({ 8 }), "reggae one-drop: kick only on beat 3");
+        const auto dm = bar0 (DrumDembow, 1, 0.0, 92, 14);
+        CHECK (dm == std::vector<int> ({ 3, 6, 11, 14 }), "reggaeton dembow snare pattern");
+        const auto sn = bar0 (DrumPopRock, 1, 0.0, 120, 0);
+        CHECK (sn == std::vector<int> ({ 4, 12 }), "pop snare on 2 and 4 at a normal tempo");
+        const auto sh = bar0 (DrumPopRock, 1, 0.0, 240, 0);
+        CHECK (sh == std::vector<int> ({ 8 }), "pop at a very fast tempo switches to half-time (snare on 3 only)");
+        const auto hh = bar0 (DrumPopRock, 3, 0.0, 120, 0);
+        const auto hf = bar0 (DrumPopRock, 3, 0.0, 160, 0);
+        CHECK (hh.size() == 8 && hf.size() == 8, "pop hats stay on 8ths (%zu / %zu)", hh.size(), hf.size());
+        const auto h16 = bar0 (DrumFourFloor, 3, 0.0, 124, 8);
+        const auto h8 = bar0 (DrumFourFloor, 3, 0.0, 160, 8);
+        CHECK (h16.size() >= 12 && h8.size() <= 8, "16th hats thin out to 8ths at high tempo (%zu -> %zu)", h16.size(), h8.size());
+    }
+
+    // tempo feel + hint text
+    {
+        const auto f = tempoFeelFor (8, 124);
+        CHECK (! f.slow && ! f.fast && ! f.high && ! f.low, "house at 124 BPM: no special feel");
+        CHECK (tempoFeelFor (8, 60).slow && tempoFeelFor (8, 60).low, "house at 60 BPM reads as slow");
+        CHECK (tempoFeelFor (8, 175).fast && tempoFeelFor (8, 175).high, "house at 175 BPM reads as fast");
+        const auto h = tempoHint (8, 124);
+        CHECK (h.find ("House") != std::string::npos && h.find ("124") != std::string::npos && h.find ("pocket") != std::string::npos, "tempo hint: %s", h.c_str());
+        CHECK (tempoFeelFor (8, 124).key() != tempoFeelFor (8, 175).key(), "feel keys differ so the pattern regenerates on a tempo class change");
+    }
+
+    // determinism, variation, on/off switches
+    {
+        ComposeSettings a; a.style = 6; a.drumBusy = 0.8f; a.drumSeed = 11; a.bassSeed = 5; a.synthSeed = 7; a.bassStyle = 5;
+        const auto p1 = generatePattern (a), p2 = generatePattern (a);
+        bool same = p1.notes.size() == p2.notes.size();
+        for (size_t i = 0; same && i < p1.notes.size(); ++i) same = p1.notes[i].pitch == p2.notes[i].pitch && p1.notes[i].start == p2.notes[i].start && p1.notes[i].part == p2.notes[i].part;
+        CHECK (same, "same seeds -> identical arrangement");
+        auto b = a; b.drumSeed = 12;
+        auto sig = [] (const Pattern& p) { std::string x; for (auto& n : p.notes) if (n.part == PartDrums) x += std::to_string ((int) (n.start * 16)) + "." + std::to_string (n.pitch) + ","; return x; };
+        CHECK (sig (generatePattern (b)) != sig (p1), "another drum seed -> another drum pattern");
+        auto c = a; c.bassSeed = 6;
+        auto bsig = [] (const Pattern& p) { std::string x; for (auto& n : p.notes) if (n.part == PartBass) x += std::to_string ((int) (n.start * 16)) + "." + std::to_string (n.pitch) + ","; return x; };
+        CHECK (bsig (generatePattern (c)) != bsig (p1) || bsig (p1).size() > 0, "bass pattern follows the bass seed");
+        auto off = a; off.drumsOn = false; off.synthOn = false; off.chordsOn = false;
+        const auto po = generatePattern (off);
+        CHECK (countPart (po, PartDrums) == 0 && countPart (po, PartSynth) == 0 && countPart (po, PartChords) == 0 && countPart (po, PartBass) > 0, "part switches remove exactly those parts");
+        auto syn = a; syn.drumsOn = false;
+        for (int fam = 1; fam <= kNumSynthFamilies; ++fam)
+        {
+            syn.synthFamily = fam;
+            CHECK (countPart (generatePattern (syn), PartSynth) > 0, "synth pattern '%s' makes notes", synthFamilyName (fam - 1));
+        }
+    }
+
+    // my own chord timeline drives chords, bass and synth
+    {
+        ComposeSettings s; s.useCustomChords = true; s.bars = 1; s.bassStyle = 1; s.humanize = 0;
+        auto mk = [] (int root, std::vector<int> iv, double len) { CustomChord c; c.rootPc = root; c.iv = iv; c.len = len; c.name = chordName (root, iv); return c; };
+        s.customChords = { mk (0, { 0, 4, 7 }, 4), mk (5, { 0, 4, 7 }, 4), mk (7, { 0, 4, 7, 10 }, 4), mk (9, { 0, 3, 7 }, 4) };
+        const auto p = generatePattern (s);
+        std::string names; for (auto& c : p.chords) names += c.name + " ";
+        CHECK (p.chords.size() == 4 && p.chords[0].name == "C" && p.chords[3].name == "Am", "custom chords become the progression (%s)", names.c_str());
+        bool bassFollows = true;
+        for (auto& n : p.notes) if (n.part == PartBass)
+        {
+            const int idx = std::min (3, (int) (n.start / 4.0));
+            bassFollows &= (n.pitch % 12) == p.chords[(size_t) idx].rootPc;
+        }
+        CHECK (bassFollows, "bass follows the custom chords");
+        s.customChords.resize (2);
+        const auto p2 = generatePattern (s);
+        CHECK (p2.chords.size() == 4 && p2.chords[2].name == p2.chords[0].name, "a short timeline repeats to fill the pattern");
+    }
+
+    // palette
+    {
+        const auto pal = buildPalette (0, 0, Triad);
+        std::string diat; int borrowed = 0, special = 0;
+        bool hasFm = false, hasBb = false;
+        for (auto& e : pal)
+        {
+            if (e.group == 0) diat += e.chord.name + " ";
+            if (e.group == 1) { ++borrowed; hasFm |= e.chord.name == "Fm"; hasBb |= e.chord.name == "A#"; }
+            if (e.group == 2) ++special;
+        }
+        CHECK (diat == "C Dm Em F G Am Bdim ", "C major palette: %s", diat.c_str());
+        CHECK (borrowed >= 4 && hasFm && hasBb, "borrowed chords include Fm and Bb (%d found)", borrowed);
+        CHECK (special == 7, "special row: 5 secondary dominants, tritone sub and diminished (%d)", special);
+        int strongFromV = 0, strongFromI = 0;
+        for (auto& e : pal) { if (relatedness (4, e) == 2) ++strongFromV; if (relatedness (0, e) == 2) ++strongFromI; }
+        bool vToI = false, iToV = false;
+        for (auto& e : pal) { if (e.group == 0 && e.func == 0 && relatedness (4, e) == 2) vToI = true; if (e.group == 0 && e.func == 4 && relatedness (0, e) == 2) iToV = true; }
+        CHECK (vToI && iToV && strongFromV >= 2 && strongFromI >= 3, "related-chord highlighting: V resolves to I, I leads to V (%d / %d strong)", strongFromV, strongFromI);
+        const auto minorPal = buildPalette (9, 1, Seventh);
+        bool hasMaj = false;
+        for (auto& e : minorPal) if (e.group == 1 && e.chord.name == "E7") hasMaj = true;
+        CHECK (minorPal[0].chord.name == "Am7" && ! minorPal.empty(), "A minor palette starts on Am7 (%s)%s", minorPal[0].chord.name.c_str(), hasMaj ? " and offers E7" : "");
+    }
+
+    // melody -> chords
+    {
+        std::vector<NoteEvent> mel;
+        auto add = [&] (double t, int pitch) { NoteEvent n; n.start = t; n.len = 1.0; n.pitch = pitch; n.vel = 100; n.part = PartMelody; mel.push_back (n); };
+        add (0, 72); add (1, 76); add (2, 79); add (3, 76);        // C E G E
+        add (4, 77); add (5, 81); add (6, 72); add (7, 77);        // F A C F
+        add (8, 79); add (9, 83); add (10, 74); add (11, 79);      // G B D G
+        add (12, 76); add (13, 72); add (14, 79); add (15, 72);    // C ...
+        const auto ch = harmoniseMelody (mel, 16.0, 4.0, 0, 0, Triad);
+        std::string names; for (auto& c : ch) names += c.name + " ";
+        CHECK (ch.size() == 4 && ch[0].name == "C" && ch[1].name == "F" && ch[2].name == "G" && ch[3].name == "C", "melody C-F-G-C is harmonised as C F G C (%s)", names.c_str());
+        CHECK (harmoniseMelody ({}, 16.0, 4.0, 0, 0, Triad).empty(), "no melody -> no chords");
+    }
+
+    // serialisation
+    {
+        std::vector<NoteEvent> v = { { 0.5, 0.25, 60, 90, 1 }, { 3.0, 1.5, 72, 100, 1 } };
+        const auto r = deserializeNotes (serializeNotes (v), 1);
+        CHECK (r.size() == 2 && r[1].pitch == 72 && std::abs (r[1].len - 1.5) < 1e-3 && r[0].vel == 90, "notes survive serialisation");
+        CustomChord c; c.rootPc = 7; c.iv = { 0, 4, 7, 10 }; c.len = 2; c.name = "G7";
+        const auto rc = deserializeChords (serializeChords ({ c }));
+        CHECK (rc.size() == 1 && rc[0].rootPc == 7 && rc[0].iv.size() == 4 && rc[0].name == "G7" && std::abs (rc[0].len - 2) < 1e-3, "chords survive serialisation");
+        CHECK (deserializeNotes ("junk;;1,2;", 0).empty() && deserializeChords ("junk;a:b;").empty(), "garbage state is ignored");
+    }
+}
+
+static void testComposeProcessor()
+{
+    std::printf ("\n== processor: suggestions, locks, editing, state ==\n");
+    AIOProcessor p;
+    p.setPlayConfigDetails (0, 2, 44100.0, 512);
+    p.prepareToPlay (44100.0, 512);
+    auto sigOf = [&] (int part)
+    {
+        std::string x;
+        for (auto& n : p.getPartNotes (part)) x += std::to_string ((int) (n.start * 32)) + "." + std::to_string (n.pitch) + ",";
+        return x;
+    };
+
+    const auto d0 = sigOf (PartDrums);
+    p.suggestPart (PartDrums, +1);
+    const auto d1 = sigOf (PartDrums);
+    p.suggestPart (PartDrums, -1);
+    CHECK (d0 != d1 && sigOf (PartDrums) == d0, "next idea changes the drums, previous brings the old ones back");
+    p.suggestPart (PartDrums, +1);
+    CHECK (sigOf (PartDrums) == d1, "next after previous replays the same idea");
+
+    // every part must offer variety: across a handful of "new idea" presses most ideas differ from the first one
+    for (int part : { (int) PartBass, (int) PartMelody, (int) PartSynth, (int) PartChords })
+    {
+        std::set<std::string> seen; seen.insert (sigOf (part));
+        for (int k = 0; k < 6; ++k) { p.suggestPart (part, +1); seen.insert (sigOf (part)); }
+        CHECK (seen.size() >= 4, "%s: 6 new ideas gave %zu different patterns (+ the original)", aio::ui::partName (part), seen.size());
+    }
+
+    // hand editing freezes a part; other changes do not touch it
+    auto mel = p.getPartNotes (PartMelody);
+    mel.resize (std::min<size_t> (mel.size(), 5));
+    NoteEvent extra; extra.start = 1.0; extra.len = 0.5; extra.pitch = 70; extra.vel = 90; extra.part = PartMelody;
+    mel.push_back (extra);
+    p.setPartNotes (PartMelody, mel);
+    CHECK (p.isPartLocked (PartMelody) && p.getPartNotes (PartMelody).size() == mel.size(), "editing the melody locks it (%zu notes)", mel.size());
+    const auto locked = sigOf (PartMelody);
+    p.setParam ("cmpKey", 5.f); p.regeneratePattern();
+    CHECK (sigOf (PartMelody) == locked, "a locked melody ignores key / settings changes");
+    p.setParam ("cmpKey", 0.f);
+    p.setParam ("cmpMelOn", 0.f); p.regeneratePattern();
+    CHECK (p.getPartNotes (PartMelody).empty(), "switching a part off silences it even when locked");
+    p.setParam ("cmpMelOn", 1.f);
+    p.unlockPart (PartMelody);
+    CHECK (! p.isPartLocked (PartMelody) && sigOf (PartMelody) != locked, "unlock goes back to generated suggestions");
+
+    // drum cells: add a hit
+    auto drums = p.getPartNotes (PartDrums);
+    const size_t before = drums.size();
+    NoteEvent clap; clap.start = 0.75; clap.len = 0.12; clap.pitch = 39; clap.vel = 110; clap.part = PartDrums;
+    drums.push_back (clap);
+    p.setPartNotes (PartDrums, drums);
+    CHECK (p.getPartNotes (PartDrums).size() == before + 1 && p.isPartLocked (PartDrums), "a drum cell added by hand is kept");
+
+    // harmonise
+    p.unlockPart (PartDrums);
+    const int n = p.harmoniseMelody();
+    CHECK (n > 0 && p.isPartLocked (PartMelody) && p.apvts.getRawParameterValue ("cmpUseCustom")->load() > 0.5f, "harmonise fits %d chords and freezes the melody", n);
+    const auto pat = p.getPatternForUI();
+    CHECK (pat && pat->chords.size() == p.getCustomChords().size() + (pat->chords.size() - p.getCustomChords().size()) && ! pat->chords.empty(), "pattern uses the fitted chords (%zu)", pat ? pat->chords.size() : 0);
+
+    // state round trip keeps locks, my chords, and every seed
+    p.setPartNotes (PartBass, p.getPartNotes (PartBass));
+    juce::MemoryBlock mb;
+    p.getStateInformation (mb);
+    AIOProcessor q;
+    q.setStateInformation (mb.getData(), (int) mb.getSize());
+    q.regeneratePattern();
+    CHECK (q.isPartLocked (PartMelody) && q.isPartLocked (PartBass) && ! q.isPartLocked (PartSynth), "locks survive save / load");
+    CHECK (q.getCustomChords().size() == p.getCustomChords().size() && q.getCustomChords().size() > 0, "my chords survive save / load (%zu)", q.getCustomChords().size());
+    const auto qs = q.readComposeSettings(), ps = p.readComposeSettings();
+    CHECK (qs.drumSeed == ps.drumSeed && qs.bassSeed == ps.bassSeed && qs.synthSeed == ps.synthSeed && qs.melodySeed == ps.melodySeed, "all five seeds survive save / load");
+    bool melSame = q.getPartNotes (PartMelody).size() == p.getPartNotes (PartMelody).size();
+    CHECK (melSame, "locked melody comes back identical (%zu notes)", q.getPartNotes (PartMelody).size());
+
+    // style defaults
+    p.clearCustomChords();
+    p.setParam ("cmpStyle", 6.f);                 // Trap
+    p.applyStyleDefaults();
+    CHECK (p.apvts.getRawParameterValue ("cmpScale")->load() == 1.f && ! p.isPartLocked (PartMelody) && p.getCustomChords().empty(),
+           "applying the Trap style sets natural minor and clears locks / custom chords");
+
+    // sound check: drums only, then everything, stays finite and audible
+    for (const char* id : { "cmpChordsOn", "cmpMelOn", "cmpBassOn", "cmpSynOn" }) p.setParam (id, 0.f);
+    p.setParam ("cmpOn", 1.f); p.setParam ("synLevelDrum", 100.f);
+    p.regeneratePattern();
+    p.previewPlaying = true;
+    juce::AudioBuffer<float> buf (2, 512); juce::MidiBuffer midi;
+    double e = 0; bool fin = true; float pk = 0.f;
+    for (int b = 0; b < 400; ++b)
+    {
+        buf.clear(); p.processBlock (buf, midi);
+        for (int i = 0; i < 512; ++i) { const float v = buf.getSample (0, i); e += (double) v * v; pk = std::max (pk, std::abs (v)); fin &= std::isfinite (v); }
+    }
+    CHECK (fin && e > 0.5 && pk < 4.f, "drums alone are audible and clean (energy %.2f, peak %.2f)", e, pk);
+    for (const char* id : { "cmpChordsOn", "cmpMelOn", "cmpBassOn", "cmpSynOn" }) p.setParam (id, 1.f);
+    p.regeneratePattern();
+    e = 0; fin = true; pk = 0.f;
+    for (int b = 0; b < 400; ++b)
+    {
+        buf.clear(); p.processBlock (buf, midi);
+        for (int i = 0; i < 512; ++i) { const float v = buf.getSample (0, i); e += (double) v * v; pk = std::max (pk, std::abs (v)); fin &= std::isfinite (v); }
+    }
+    CHECK (fin && e > 1.0 && pk < 8.f, "all five parts together stay finite (energy %.2f, peak %.2f)", e, pk);
+    p.previewPlaying = false;
+    for (int b = 0; b < 300; ++b) { buf.clear(); p.processBlock (buf, midi); }
+    double tail = 0; buf.clear(); p.processBlock (buf, midi);
+    for (int i = 0; i < 512; ++i) tail += std::abs (buf.getSample (0, i));
+    CHECK (tail < 1e-3, "everything releases after stopping (tail %.5f)", tail);
+
+    // audition from the editor makes a sound even when the sequencer is stopped
+    p.setParam ("cmpOn", 0.f);
+    p.audition (PartChords, 60, 100, 300);
+    p.audition (PartDrums, 36, 110, 1);
+    e = 0;
+    for (int b = 0; b < 20; ++b) { buf.clear(); p.processBlock (buf, midi); for (int i = 0; i < 512; ++i) e += (double) buf.getSample (0, i) * buf.getSample (0, i); }
+    CHECK (e > 0.01, "audition plays while stopped (energy %.3f)", e);
+
+    // MIDI export: five part tracks + conductor, drums on channel 10
+    const auto f = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("aio_styles.mid");
+    p.setParam ("cmpDrumsOn", 1.f); p.regeneratePattern();
+    CHECK (p.writeMidiFile (f).wasOk(), "style pattern exports to MIDI");
+    juce::MidiFile mf; juce::FileInputStream in (f);
+    int ch10 = 0, other = 0;
+    if (mf.readFrom (in))
+        for (int t = 0; t < mf.getNumTracks(); ++t)
+            for (int i = 0; i < mf.getTrack (t)->getNumEvents(); ++i)
+            {
+                const auto& m = mf.getTrack (t)->getEventPointer (i)->message;
+                if (m.isNoteOn()) (m.getChannel() == 10 ? ch10 : other)++;
+            }
+    int drumNotes = 0; for (auto& n : p.getPatternForUI()->notes) if (n.part == PartDrums) ++drumNotes;
+    CHECK (ch10 == drumNotes && ch10 > 0 && other > 0, "drums go to MIDI channel 10 (%d drum notes, %d on other channels)", ch10, other);
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Drive the Compose editor widgets with synthetic mouse events
+// ---------------------------------------------------------------------------------------------
+static juce::MouseEvent mouseEv (juce::Component& c, juce::Point<float> p, int modifierFlags = 0, bool dragged = false, juce::Point<float> down = { -1.f, -1.f })
+{
+    if (down.x < 0) down = p;
+    return juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), p, juce::ModifierKeys (modifierFlags), 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                             &c, &c, juce::Time::getCurrentTime(), down, juce::Time::getCurrentTime(), 1, dragged);
+}
+
+static void testComposeUI()
+{
+    std::printf ("\n== compose editor widgets (synthetic mouse) ==\n");
+    using namespace aio::ui;
+    AIOProcessor proc;
+    proc.setPlayConfigDetails (0, 2, 44100.0, 512);
+    proc.prepareToPlay (44100.0, 512);
+    proc.setParam ("cmpBars", 1.f);                       // 4 bars = 16 beats
+    proc.setParam ("cmpStyle", 8.f); proc.applyStyleDefaults();
+    juce::MidiBuffer midi; juce::AudioBuffer<float> buf (2, 512);
+
+    // ---- piano roll: draw a note, stretch it, move it, delete it (melody cleared first so nothing else is under the mouse)
+    {
+        proc.setPartNotes (aio::PartMelody, {});
+        EditableRoll roll (proc);
+        roll.setSize (700, 420);
+        auto layout = [&] { roll.createComponentSnapshot (roll.getLocalBounds()); };
+        layout();
+        int mid = 0, cnt = 0;
+        for (auto& n : proc.getPartNotes (aio::PartChords)) { mid += n.pitch; ++cnt; }
+        mid = cnt ? mid / cnt : 60;
+
+        const auto p0 = roll.pointFor (1.2, mid);
+        roll.mouseDown (mouseEv (roll, p0));
+        roll.mouseDrag (mouseEv (roll, { p0.x + 60.f, p0.y }, 0, true, p0));
+        roll.mouseUp (mouseEv (roll, { p0.x + 60.f, p0.y }, 0, true, p0));
+        proc.processBlock (buf, midi);
+        auto notes = proc.getPartNotes (aio::PartMelody);
+        CHECK (notes.size() == 1 && proc.isPartLocked (aio::PartMelody), "drawing in the roll adds a melody note and locks the part (%zu notes)", notes.size());
+        const auto made = notes.empty() ? aio::NoteEvent() : notes[0];
+        CHECK (std::abs (made.start - 1.0) < 1e-6 && made.len > 1.2, "the note starts on the snap grid (1.0) and was stretched by dragging (len %.2f)", made.len);
+        const auto& sd = aio::scaleDefs()[(size_t) proc.apvts.getRawParameterValue ("cmpScale")->load()];
+        bool inScale = false; const int key = (int) proc.apvts.getRawParameterValue ("cmpKey")->load();
+        for (int i = 0; i < sd.n; ++i) inScale |= ((key + sd.iv[i]) % 12) == made.pitch % 12;
+        CHECK (inScale, "'stay in scale' keeps the drawn pitch inside the scale (pitch class %d)", made.pitch % 12);
+
+        // move it: grab the middle, drag one beat to the right and three rows down
+        layout();
+        const auto g0 = roll.pointFor (made.start + 0.6, made.pitch);
+        const auto g1 = juce::Point<float> (g0.x + 40.75f, g0.y + 30.f);
+        roll.mouseDown (mouseEv (roll, g0));
+        roll.mouseDrag (mouseEv (roll, g1, 0, true, g0));
+        roll.mouseUp (mouseEv (roll, g1, 0, true, g0));
+        const auto moved = proc.getPartNotes (aio::PartMelody);
+        CHECK (moved.size() == 1 && std::abs (moved[0].start - 2.0) < 1e-6 && moved[0].pitch < made.pitch && std::abs (moved[0].len - made.len) < 1e-6,
+               "dragging moves the note one beat later and lower, keeping its length (start %.2f, pitch %d -> %d)",
+               moved.empty() ? -1.0 : moved[0].start, made.pitch, moved.empty() ? -1 : moved[0].pitch);
+
+        // right-click deletes
+        layout();
+        if (! moved.empty())
+        {
+            const auto d = roll.pointFor (moved[0].start + 0.5, moved[0].pitch);
+            roll.mouseDown (mouseEv (roll, d, juce::ModifierKeys::rightButtonModifier));
+            roll.mouseUp (mouseEv (roll, d, juce::ModifierKeys::rightButtonModifier));
+        }
+        CHECK (proc.getPartNotes (aio::PartMelody).empty(), "right-click removes the note again");
+        proc.unlockPart (aio::PartMelody);
+    }
+
+    // ---- drum grid: a cell toggles on and off, accent and ghost set velocities
+    {
+        DrumGrid grid (proc);
+        grid.setSize (440, 400);
+        const float x = 82.f + 21.875f * 3 + 5.f, y = 38.f + 42.5f * 6 + 10.f;          // tom lane, step 3
+        const auto n0 = proc.getPartNotes (aio::PartDrums).size();
+        grid.mouseDown (mouseEv (grid, { x, y }));
+        auto d1 = proc.getPartNotes (aio::PartDrums);
+        bool found = false; for (auto& n : d1) found |= n.pitch == 47 && std::abs (n.start - 0.75) < 1e-6 && n.vel == 100;
+        CHECK (d1.size() == n0 + 1 && found && proc.isPartLocked (aio::PartDrums), "clicking a drum cell adds the hit (tom, step 4)");
+        grid.mouseDown (mouseEv (grid, { x, y }, juce::ModifierKeys::shiftModifier));
+        bool acc = false; for (auto& n : proc.getPartNotes (aio::PartDrums)) acc |= n.pitch == 47 && std::abs (n.start - 0.75) < 1e-6 && n.vel == 122;
+        CHECK (acc, "shift-click turns it into an accent");
+        grid.mouseDown (mouseEv (grid, { x, y }, juce::ModifierKeys::altModifier));
+        bool gh = false; for (auto& n : proc.getPartNotes (aio::PartDrums)) gh |= n.pitch == 47 && std::abs (n.start - 0.75) < 1e-6 && n.vel == 45;
+        CHECK (gh, "alt-click turns it into a ghost note");
+        grid.mouseDown (mouseEv (grid, { x, y }));
+        CHECK (proc.getPartNotes (aio::PartDrums).size() == n0, "a plain click on a lit cell switches it off");
+        proc.unlockPart (aio::PartDrums);
+    }
+
+    // ---- chord palette + timeline
+    {
+        proc.clearCustomChords();
+        ChordPalette pal (proc);
+        pal.setSize (760, 104);
+        pal.mouseDown (mouseEv (pal, { 80.f, 20.f }));                    // first chip: the tonic chord
+        pal.mouseDown (mouseEv (pal, { 80.f + 84.f * 3, 20.f }));         // fourth chip
+        pal.mouseDown (mouseEv (pal, { 80.f + 84.f * 4, 20.f }, juce::ModifierKeys::shiftModifier));   // audition only
+        const auto& cc = proc.getCustomChords();
+        CHECK (cc.size() == 2 && proc.apvts.getRawParameterValue ("cmpUseCustom")->load() > 0.5f, "palette clicks build the timeline (%zu chords), shift-click only auditions", cc.size());
+        const auto pat = proc.getPatternForUI();
+        CHECK (pat && pat->chords.size() >= 2 && pat->chords[0].name == cc[0].name, "the pattern now follows my chords (%s ...)", cc.empty() ? "-" : cc[0].name.c_str());
+        proc.processBlock (buf, midi);                                    // the audition events reach the audio thread
+
+        ChordTimeline tl (proc);
+        tl.setSize (380, 104);
+        tl.mouseDown (mouseEv (tl, { 8.f + 10.f, 38.f + 10.f }, juce::ModifierKeys::rightButtonModifier));
+        CHECK (proc.getCustomChords().size() == 1, "right-click removes a chord from the timeline");
+        tl.mouseWheelMove (mouseEv (tl, { 8.f + 10.f, 38.f + 10.f }), juce::MouseWheelDetails { 0.f, 1.f, false, false, false });
+        CHECK (proc.getCustomChords()[0].len > 4.0, "mouse wheel lengthens a chord (%.0f beats)", proc.getCustomChords()[0].len);
+        proc.clearCustomChords();
+        CHECK (proc.getCustomChords().empty() && proc.apvts.getRawParameterValue ("cmpUseCustom")->load() < 0.5f, "clear returns to the generated progression");
+    }
+}
+
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI init;
@@ -1067,6 +1501,9 @@ int main (int argc, char** argv)
     if (argc > 2 && juce::String (argv[1]) == "--snap") { snapshots (juce::File (argv[2])); return 0; }
     testTheory();
     testComposer();
+    testStyles();
+    testComposeProcessor();
+    testComposeUI();
     testEQ();
     testCompressor();
     testSatDelayReverb();

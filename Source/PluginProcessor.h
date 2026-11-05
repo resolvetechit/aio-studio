@@ -12,6 +12,7 @@
 #include "dsp/Guide.h"
 #include "dsp/PitchDetector.h"
 #include "compose/Composer.h"
+#include "compose/Styles.h"
 #include "master/MasterEngine.h"
 #include "master/MasterSession.h"
 #include "sing/Sing.h"
@@ -68,6 +69,21 @@ public:
     void regeneratePattern();                           // message thread only
     void newChordSeed();
     void newMelodySeed();
+
+    // suggestions: every part has its own seed + history, so "next" / "previous" cycles through ideas
+    void suggestPart (int part, int dir);               // dir +1 next idea, -1 previous (message thread)
+    void applyStyleDefaults();                          // push the selected style's scale / progression / feel into the settings
+    bool isPartLocked (int part) const { return part >= 0 && part < aio::kNumParts && partLocked[(size_t) part]; }
+    void unlockPart (int part);
+    void setPartNotes (int part, std::vector<aio::NoteEvent> notes);   // hand edit: freezes the part
+    std::vector<aio::NoteEvent> getPartNotes (int part) const;
+    const std::vector<aio::CustomChord>& getCustomChords() const { return customChords; }
+    void addCustomChord (const aio::Chord&);
+    void setCustomChords (std::vector<aio::CustomChord>);
+    void clearCustomChords();
+    int  harmoniseMelody();                             // chords that fit the current melody; returns how many
+    void audition (int part, int note, int vel, int lenMs);   // message thread -> audio thread. lenMs > 0 one-shot, 0 hold, < 0 release
+    static int midiChannelForPart (int part) { static const int ch[5] = { 1, 2, 3, 10, 4 }; return ch[std::clamp (part, 0, 4)]; }
     std::shared_ptr<const aio::Pattern> getPatternForUI() const { return uiPattern; }   // message thread only
     std::atomic<bool>   previewPlaying { false };
     std::atomic<double> uiBeat { 0.0 };                 // playhead inside the pattern, in beats
@@ -135,7 +151,19 @@ private:
     int  reportedLatency = 0;
 
     // Compose state
-    std::atomic<uint32_t> chordSeed { 20240611u }, melodySeed { 1337u };
+    std::atomic<uint32_t> chordSeed { 20240611u }, melodySeed { 1337u }, bassSeed { 4242u }, drumSeed { 909u }, synthSeed { 303u };
+    std::atomic<uint32_t>& seedOf (int part) { std::atomic<uint32_t>* a[5] = { &chordSeed, &melodySeed, &bassSeed, &drumSeed, &synthSeed }; return *a[std::clamp (part, 0, 4)]; }
+    struct SeedHist { std::vector<uint32_t> seeds; int pos = -1; };
+    std::array<SeedHist, 5> seedHist;
+    std::array<bool, 5> partLocked {};
+    std::array<std::vector<aio::NoteEvent>, 5> lockedNotes;
+    std::vector<aio::CustomChord> customChords;
+    std::atomic<int> lastFeelKey { -1 };
+    struct Aud { int part, note, vel, lenMs; };
+    struct AudOff { int part = 0, note = 0, left = 0; bool used = false; };
+    std::array<AudOff, 32> audOff {};
+    std::array<Aud, 64> audData {};
+    juce::AbstractFifo audFifo { 64 };
     std::array<std::shared_ptr<const aio::Pattern>, 6> ring;
     int ringPos = 0;
     std::shared_ptr<const aio::Pattern> uiPattern;
@@ -154,7 +182,7 @@ private:
 
     double previewBeat = 0.0, expectedBeat = 0.0;
     bool wasRunning = false, wasComposeRun = false;
-    bool outActive[3][128] {};
+    bool outActive[5][128] {};
     std::array<Ev, 1024> evBuf;
 
     // Auto Master

@@ -14,6 +14,7 @@ public:
     void resized() override;
 
     void showTab (int index);
+    void setComposeView (int view);      // 0 arrange, 1 settings
 
 private:
     struct PanelBase : public juce::Component {};

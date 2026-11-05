@@ -1,4 +1,5 @@
 #include "Composer.h"
+#include "Styles.h"
 
 namespace aio
 {
@@ -296,42 +297,70 @@ Pattern generatePattern (const ComposeSettings& s)
     Pattern p;
     p.lengthBeats = barsFromIndex (s.bars) * 4.0;
     const double clen = chordLenFromIndex (s.chordLen);
-    const int nChords = std::max (1, (int) std::lround (p.lengthBeats / clen));
     const int scaleIdx = std::clamp (s.scale, 0, 11);
     const auto& sd = scaleDefs()[(size_t) scaleIdx];
     const bool minorFlavour = sd.iv[2] == 3;
+    const int styleIdx = std::clamp (s.style, 0, numStyles() - 1);
+    const StyleDef& style = styleDefs()[(size_t) styleIdx];
+    const TempoFeel feel = tempoFeelFor (styleIdx, s.bpm);
 
     Rng rc (s.chordSeed * 2654435761u + 77u);
 
-    // ---- progression ----
-    std::vector<ProgSlot> slots;
-    const auto& defs = progDefs();
-    if (s.progression < (int) defs.size())
+    // ---- chord list: the user's own timeline, or a progression ----
+    struct Span { Chord c; double len; };
+    std::vector<Span> spans;
+    if (s.useCustomChords && ! s.customChords.empty())
     {
-        const auto& d = defs[(size_t) s.progression].slots;
-        for (int i = 0; i < nChords; ++i) slots.push_back (d[(size_t) i % d.size()]);
+        double t = 0;
+        for (size_t i = 0; t < p.lengthBeats - 1e-6; ++i)
+        {
+            const auto& cc = s.customChords[i % s.customChords.size()];
+            Chord c; c.rootPc = cc.rootPc; c.iv = cc.iv; c.name = cc.name.empty() ? chordName (cc.rootPc, cc.iv) : cc.name;
+            const double len = std::min (std::max (0.5, cc.len), p.lengthBeats - t);
+            spans.push_back ({ c, len });
+            t += len;
+        }
     }
     else
-        slots = randomProgression (nChords, minorFlavour, s.progression > (int) defs.size(), rc);
+    {
+        const int nChords = std::max (1, (int) std::lround (p.lengthBeats / clen));
+        std::vector<ProgSlot> slots;
+        const auto& defs = progDefs();
+        if (s.progression < (int) defs.size())
+        {
+            const auto& d = defs[(size_t) s.progression].slots;
+            for (int i = 0; i < nChords; ++i) slots.push_back (d[(size_t) i % d.size()]);
+        }
+        else
+            slots = randomProgression (nChords, minorFlavour, s.progression > (int) defs.size(), rc);
+
+        for (int i = 0; i < nChords; ++i)
+        {
+            int kind = s.chordKind;
+            if (kind == Mixed)
+            {
+                const float w[4] = { 0.35f, 0.35f, 0.15f, 0.15f };
+                static const int kinds[4] = { Triad, Seventh, Add9, Sus4 };
+                kind = kinds[rc.weighted (w, 4)];
+            }
+            spans.push_back ({ buildChord (s.key, scaleIdx, slots[(size_t) i].deg, kind, slots[(size_t) i].force), clen });
+        }
+    }
 
     // ---- chords + voicing ----
     std::vector<int> prev;
     const int center = 12 * (s.chordOct + 1) + 6;
     std::vector<NoteEvent> chordNotes, bassNotes;
-    for (int i = 0; i < nChords; ++i)
+    double t0 = 0;
+    for (const auto& sp : spans)
     {
-        int kind = s.chordKind;
-        if (kind == Mixed)
-        {
-            const float w[4] = { 0.35f, 0.35f, 0.15f, 0.15f };
-            static const int kinds[4] = { Triad, Seventh, Add9, Sus4 };
-            kind = kinds[rc.weighted (w, 4)];
-        }
-        const Chord c = buildChord (s.key, scaleIdx, slots[(size_t) i].deg, kind, slots[(size_t) i].force);
+        const Chord& c = sp.c;
+        const double len = sp.len;
         ChordInfo ci;
-        ci.start = i * clen; ci.len = clen; ci.name = c.name; ci.rootPc = c.rootPc;
+        ci.start = t0; ci.len = len; ci.name = c.name; ci.rootPc = c.rootPc;
         for (int iv : c.iv) ci.pcs.push_back ((c.rootPc + iv) % 12);
         p.chords.push_back (ci);
+        t0 += len;
 
         auto v = voiceChord (c, prev, center, s.voicing, s.smoothVoicing);
         prev = v;
@@ -339,17 +368,20 @@ Pattern generatePattern (const ComposeSettings& s)
         std::vector<int> arpVoices = v;
         if (s.chordRhythm >= 5 && s.chordRhythm <= 8) arpVoices.push_back (v.front() + 12);
         const bool isArp = (s.chordRhythm >= 5 && s.chordRhythm <= 8);
-        const auto hits = chordHits (s.chordRhythm, clen, (int) (isArp ? arpVoices.size() : v.size()));
-        for (const auto& h : hits)
-        {
-            const int vel = s.chordVel + (h.off < 1e-6 ? 8 : 0);
-            if (h.voice < 0)
-                for (int pch : v) chordNotes.push_back ({ ci.start + h.off, h.dur, pch, vel, PartChords });
-            else
-                chordNotes.push_back ({ ci.start + h.off, h.dur, (isArp ? arpVoices : v)[(size_t) h.voice], vel, PartChords });
-        }
-        if (s.bassOn) addBass (bassNotes, ci, s.bassStyle, 100);
+        const auto hits = chordHits (s.chordRhythm, len, (int) (isArp ? arpVoices.size() : v.size()));
+        if (s.chordsOn)
+            for (const auto& h : hits)
+            {
+                const int vel = s.chordVel + (h.off < 1e-6 ? 8 : 0);
+                if (h.voice < 0)
+                    for (int pch : v) chordNotes.push_back ({ ci.start + h.off, h.dur, pch, vel, PartChords });
+                else
+                    chordNotes.push_back ({ ci.start + h.off, h.dur, (isArp ? arpVoices : v)[(size_t) h.voice], vel, PartChords });
+            }
+        if (s.bassOn && s.bassStyle <= 4) addBass (bassNotes, ci, s.bassStyle, 100);
     }
+    if (s.bassOn && s.bassStyle >= 5)
+        genStyleBass (bassNotes, p.chords, style.bass, feel, s.bassSeed, 100);
 
     Rng rf (s.chordSeed * 40503u + 5u);
     applyFeel (chordNotes, p.lengthBeats, s.swing, s.humanize, rf);
@@ -359,11 +391,31 @@ Pattern generatePattern (const ComposeSettings& s)
 
     if (s.melodyOn)
     {
+        ComposeSettings ms = s;
+        ms.melodyDensity = std::clamp (s.melodyDensity * (feel.high ? 0.75f : feel.low ? 1.15f : 1.f), 0.f, 1.f);
         Pattern mel; mel.lengthBeats = p.lengthBeats;
-        genMelody (s, p.chords, mel);
+        genMelody (ms, p.chords, mel);
         Rng rm (s.melodySeed * 31u + 9u);
         applyFeel (mel.notes, p.lengthBeats, s.swing, s.humanize * 0.6f, rm);
         p.notes.insert (p.notes.end(), mel.notes.begin(), mel.notes.end());
+    }
+
+    if (s.drumsOn)
+    {
+        std::vector<NoteEvent> drums;
+        genDrums (drums, s, p.lengthBeats, feel, s.drumFamily > 0 ? s.drumFamily - 1 : style.drum);
+        Rng rd (s.drumSeed * 7919u + 13u);
+        applyFeel (drums, p.lengthBeats, s.swing, s.humanize * 0.3f, rd);
+        p.notes.insert (p.notes.end(), drums.begin(), drums.end());
+    }
+
+    if (s.synthOn)
+    {
+        std::vector<NoteEvent> syn;
+        genSynthPart (syn, p.chords, s.synthFamily > 0 ? s.synthFamily - 1 : style.synth, s, feel);
+        Rng rs (s.synthSeed * 104729u + 17u);
+        applyFeel (syn, p.lengthBeats, s.swing, s.humanize * 0.4f, rs);
+        p.notes.insert (p.notes.end(), syn.begin(), syn.end());
     }
 
     std::stable_sort (p.notes.begin(), p.notes.end(), [] (const NoteEvent& a, const NoteEvent& b) { return a.start < b.start; });

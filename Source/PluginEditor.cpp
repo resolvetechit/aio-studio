@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "ui/ComposeUI.h"
 #include "Presets.h"
 #include <deque>
 
@@ -310,28 +311,36 @@ private:
     bool started = false;
 };
 
-class AIOEditor::ComposePanel : public AIOEditor::PanelBase
+class AIOEditor::ComposePanel : public AIOEditor::PanelBase, private juce::Timer
 {
 public:
     explicit ComposePanel (AIOProcessor& p)
         : proc (p),
           on (p.apvts, "cmpOn", "COMPOSE ON", col::violet),
           dragBtn (p),
-          roll (p),
+          style (p.apvts, "cmpStyle", "Style", true),
+          palette (p), timeline (p), strip (p), roll (p), drums (p),
           key (p.apvts, "cmpKey", "Key", true), scale (p.apvts, "cmpScale", "Scale", true), prog (p.apvts, "cmpProg", "Progression", true),
           bars (p.apvts, "cmpBars", "Length", true), chordLen (p.apvts, "cmpChordLen", "Chord length", true),
           chordKind (p.apvts, "cmpChordKind", "Chord type", true), voicing (p.apvts, "cmpVoicing", "Voicing", true),
           rhythm (p.apvts, "cmpRhythm", "Chord rhythm", true), smooth (p.apvts, "cmpSmooth", "Smooth voice-leading", col::violet),
           cOct (p.apvts, "cmpChordOct", "Octave", 0, col::chords), cVel (p.apvts, "cmpChordVel", "Velocity", 0, col::chords),
           cHuman (p.apvts, "cmpHuman", "Humanize", 0, col::chords), cSwing (p.apvts, "cmpSwing", "Swing", 0, col::chords),
-          melOn (p.apvts, "cmpMelOn", "MELODY ON", col::melody), melStyle (p.apvts, "cmpMelStyle", "Style"), melRange (p.apvts, "cmpMelRange", "Range"),
+          melStyle (p.apvts, "cmpMelStyle", "Style"), melRange (p.apvts, "cmpMelRange", "Range"),
           mDens (p.apvts, "cmpMelDensity", "Density", 0, col::melody), mRest (p.apvts, "cmpMelRests", "Rests", 0, col::melody),
           mOct (p.apvts, "cmpMelOct", "Octave", 0, col::melody), mVel (p.apvts, "cmpMelVel", "Velocity", 0, col::melody),
-          bassOn (p.apvts, "cmpBassOn", "BASS ON", col::bass), bassStyle (p.apvts, "cmpBassStyle", "Style"),
+          bassStyle (p.apvts, "cmpBassStyle", "Pattern"),
+          drumStyle (p.apvts, "cmpDrumStyle", "Pattern"), dBusy (p.apvts, "cmpDrumBusy", "Variation", 0, col::accent2),
+          dVel (p.apvts, "cmpDrumVel", "Velocity", 0, col::accent2),
+          synStyle (p.apvts, "cmpSynStyle", "Pattern"), sOct (p.apvts, "cmpSynOct", "Octave", 0, col::accent),
+          sVel (p.apvts, "cmpSynVel", "Velocity", 0, col::accent),
           wChord (p.apvts, "synWaveChord", "Chords"), wMel (p.apvts, "synWaveMel", "Melody"), wBass (p.apvts, "synWaveBass", "Bass"),
+          wSyn (p.apvts, "synWaveSyn", "Synth"),
           lChord (p.apvts, "synLevelChord", "Chords", 0, col::violet), lMel (p.apvts, "synLevelMel", "Melody", 0, col::violet),
-          lBass (p.apvts, "synLevelBass", "Bass", 0, col::violet), sCut (p.apvts, "synCutoff", "Cutoff", 0, col::violet),
-          sAtk (p.apvts, "synAttack", "Attack", 0, col::violet), sRel (p.apvts, "synRelease", "Release", 0, col::violet)
+          lBass (p.apvts, "synLevelBass", "Bass", 0, col::violet), lSyn (p.apvts, "synLevelSyn", "Synth", 0, col::violet),
+          lDrum (p.apvts, "synLevelDrum", "Drums", 0, col::violet),
+          sCut (p.apvts, "synCutoff", "Cutoff", 0, col::violet), sAtk (p.apvts, "synAttack", "Attack", 0, col::violet),
+          sRel (p.apvts, "synRelease", "Release", 0, col::violet)
     {
         preview.setClickingTogglesState (true);
         preview.setButtonText ("Play preview");
@@ -340,15 +349,14 @@ public:
             proc.previewPlaying = preview.getToggleState();
             preview.setButtonText (preview.getToggleState() ? "Stop preview" : "Play preview");
         };
-        newChords.setButtonText ("New chords");
-        newChords.onClick = [this] { proc.newChordSeed(); };
-        newMelody.setButtonText ("New melody");
-        newMelody.onClick = [this] { proc.newMelodySeed(); };
+        applyBtn.setButtonText ("Apply style");
+        applyBtn.setTooltip ("Sets scale, progression, chord rhythm, melody feel and swing from the style, and gives every part a fresh idea");
+        applyBtn.onClick = [this] { proc.applyStyleDefaults(); };
         saveBtn.setButtonText ("Save .mid");
         saveBtn.onClick = [this]
         {
             chooser = std::make_unique<juce::FileChooser> ("Save MIDI", juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
-                                                                             .getChildFile ("AIO Chords + Melody.mid"), "*.mid");
+                                                                             .getChildFile ("AIO Studio Pattern.mid"), "*.mid");
             chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
                                       | juce::FileBrowserComponent::warnAboutOverwriting,
                                   [this] (const juce::FileChooser& fc)
@@ -357,96 +365,171 @@ public:
                                       if (f != juce::File()) proc.writeMidiFile (f.withFileExtension ("mid"));
                                   });
         };
-        dragBtn.setTooltip ("Drag this onto a Piano Roll or the Playlist in FL Studio");
+        dragBtn.setTooltip ("Drag this onto a Piano Roll or the Playlist in FL Studio (all parts, drums on channel 10)");
 
-        for (auto* c : std::initializer_list<juce::Component*> {
-                 &on, &preview, &newChords, &newMelody, &dragBtn, &saveBtn, &roll,
-                 &key, &scale, &prog, &bars, &chordLen, &chordKind, &voicing, &rhythm, &smooth,
-                 &cOct, &cVel, &cHuman, &cSwing, &melOn, &melStyle, &melRange, &mDens, &mRest, &mOct, &mVel,
-                 &bassOn, &bassStyle, &wChord, &wMel, &wBass, &lChord, &lMel, &lBass, &sCut, &sAtk, &sRel })
+        for (auto* b : { &viewArrange, &viewSettings })
+        {
+            b->setClickingTogglesState (true);
+            b->setRadioGroupId (7002);
+            b->setColour (juce::TextButton::buttonOnColourId, col::violet.withAlpha (0.8f));
+        }
+        viewArrange.setButtonText ("ARRANGE");  viewSettings.setButtonText ("SETTINGS");
+        viewArrange.onClick  = [this] { setView (0); };
+        viewSettings.onClick = [this] { setView (1); };
+
+        hint.setColour (juce::Label::textColourId, col::dim);
+        hint.setFont (juce::Font (juce::FontOptions (12.5f)));
+        hint.setJustificationType (juce::Justification::centredLeft);
+
+        for (auto* c : std::initializer_list<juce::Component*> { &on, &preview, &style, &applyBtn, &dragBtn, &saveBtn, &viewArrange, &viewSettings, &hint })
             addAndMakeVisible (c);
+        for (auto* c : arrangeItems()) addChildComponent (c);
+        for (auto* c : settingsItems()) addChildComponent (c);
+        viewArrange.setToggleState (true, juce::dontSendNotification);
+        setView (0);
+        timerCallback();
+        startTimerHz (4);
     }
 
     ~ComposePanel() override { proc.previewPlaying = false; }
 
     void paint (juce::Graphics& g) override
     {
+        if (view != 1) return;
         drawSection (g, harmony, "Harmony", col::violet);
         drawSection (g, sChords, "Chords", col::chords);
         drawSection (g, sMelody, "Melody", col::melody);
         drawSection (g, sBass, "Bass", col::bass);
-        drawSection (g, sSynth, "Preview synth", col::violet);
+        drawSection (g, sDrums, "Drums", col::accent2);
+        drawSection (g, sSynthPart, "Synth / arp part", col::accent);
+        drawSection (g, sSound, "Preview sound (the built-in synth and drum kit)", col::violet);
     }
 
     void resized() override
     {
         auto b = getLocalBounds();
-        auto bar = b.removeFromTop (36);
-        on.setBounds (bar.removeFromLeft (130)); bar.removeFromLeft (8);
-        preview.setBounds (bar.removeFromLeft (120)); bar.removeFromLeft (8);
-        newChords.setBounds (bar.removeFromLeft (110)); bar.removeFromLeft (8);
-        newMelody.setBounds (bar.removeFromLeft (110)); bar.removeFromLeft (20);
-        dragBtn.setBounds (bar.removeFromLeft (200)); bar.removeFromLeft (8);
-        saveBtn.setBounds (bar.removeFromLeft (100));
-        b.removeFromTop (8);
+        auto bar = b.removeFromTop (34);
+        on.setBounds (bar.removeFromLeft (124)); bar.removeFromLeft (8);
+        preview.setBounds (bar.removeFromLeft (108)); bar.removeFromLeft (10);
+        style.setBounds (bar.removeFromLeft (236).withTrimmedTop (3).withTrimmedBottom (3)); bar.removeFromLeft (6);
+        applyBtn.setBounds (bar.removeFromLeft (92)); bar.removeFromLeft (14);
+        viewSettings.setBounds (bar.removeFromRight (92)); bar.removeFromRight (4);
+        viewArrange.setBounds (bar.removeFromRight (92)); bar.removeFromRight (14);
+        saveBtn.setBounds (bar.removeFromRight (86)); bar.removeFromRight (6);
+        dragBtn.setBounds (bar.removeFromRight (170));
+        b.removeFromTop (2);
+        hint.setBounds (b.removeFromTop (20));
+        b.removeFromTop (4);
 
-        auto bottom = b.removeFromBottom (214);
-        b.removeFromBottom (8);
+        if (view == 0)
+        {
+            auto rowA = b.removeFromTop (104);
+            palette.setBounds (rowA.removeFromLeft (rowA.getWidth() - 400)); rowA.removeFromLeft (8);
+            timeline.setBounds (rowA);
+            b.removeFromTop (6);
+            strip.setBounds (b.removeFromTop (34));
+            b.removeFromTop (6);
+            drums.setBounds (b.removeFromRight (440)); b.removeFromRight (8);
+            roll.setBounds (b);
+            return;
+        }
+
         harmony = b.removeFromLeft (300);
         b.removeFromLeft (8);
-        roll.setBounds (b);
-
         auto h = harmony.reduced (14, 32);
         for (auto* c : std::initializer_list<Combo*> { &key, &scale, &prog, &bars, &chordLen, &chordKind, &voicing, &rhythm })
             c->setBounds (h.removeFromTop (28));
         h.removeFromTop (6);
         smooth.setBounds (h.removeFromTop (26));
 
-        const int W = bottom.getWidth();
-        sChords = bottom.removeFromLeft ((int) (W * 0.21f)); bottom.removeFromLeft (8);
-        sMelody = bottom.removeFromLeft ((int) (W * 0.31f)); bottom.removeFromLeft (8);
-        sBass   = bottom.removeFromLeft ((int) (W * 0.11f)); bottom.removeFromLeft (8);
-        sSynth  = bottom;
+        auto row1 = b.removeFromTop (186);
+        b.removeFromTop (8);
+        auto row2 = b.removeFromTop (128);
+        b.removeFromTop (8);
+        sSound = b;
 
-        grid (sChords.reduced (8, 30), { &cOct, &cVel, &cHuman, &cSwing }, 2, 88);
-
+        const int W = row1.getWidth();
+        sChords = row1.removeFromLeft ((int) (W * 0.26f)); row1.removeFromLeft (8);
+        sMelody = row1.removeFromLeft ((int) (W * 0.52f)); row1.removeFromLeft (8);
+        sBass = row1;
+        grid (sChords.reduced (8, 30), { &cOct, &cVel, &cHuman, &cSwing }, 2, 70);
         auto m = sMelody.reduced (10, 30);
         auto mt = m.removeFromTop (40);
-        melOn.setBounds (mt.removeFromLeft (92).withHeight (26).translated (0, 14)); mt.removeFromLeft (6);
         melStyle.setBounds (mt.removeFromLeft (mt.getWidth() / 2 - 3)); mt.removeFromLeft (6);
         melRange.setBounds (mt);
-        grid (m, { &mDens, &mRest, &mOct, &mVel }, 4, 88);
+        grid (m, { &mDens, &mRest, &mOct, &mVel }, 4, 90);
+        bassStyle.setBounds (sBass.reduced (10, 30).removeFromTop (42));
 
-        auto bs = sBass.reduced (10, 30);
-        bassOn.setBounds (bs.removeFromTop (26)); bs.removeFromTop (6);
-        bassStyle.setBounds (bs.removeFromTop (42));
+        const int W2 = row2.getWidth();
+        sDrums = row2.removeFromLeft (W2 / 2 - 4); row2.removeFromLeft (8);
+        sSynthPart = row2;
+        auto d = sDrums.reduced (10, 28);
+        drumStyle.setBounds (d.removeFromLeft (d.getWidth() / 2).withTrimmedRight (8).withHeight (42));
+        grid (d, { &dBusy, &dVel }, 2, 80);
+        auto sp = sSynthPart.reduced (10, 28);
+        synStyle.setBounds (sp.removeFromLeft (sp.getWidth() / 2).withTrimmedRight (8).withHeight (42));
+        grid (sp, { &sOct, &sVel }, 2, 80);
 
-        auto sy = sSynth.reduced (10, 30);
+        auto sy = sSound.reduced (10, 30);
         auto sw = sy.removeFromTop (40);
-        const int ww = sw.getWidth() / 3;
+        const int ww = sw.getWidth() / 4;
         wChord.setBounds (sw.removeFromLeft (ww).withTrimmedRight (6));
         wMel.setBounds (sw.removeFromLeft (ww).withTrimmedRight (6));
-        wBass.setBounds (sw);
-        grid (sy, { &lChord, &lMel, &lBass, &sCut, &sAtk, &sRel }, 6, 88);
+        wBass.setBounds (sw.removeFromLeft (ww).withTrimmedRight (6));
+        wSyn.setBounds (sw);
+        grid (sy, { &lChord, &lMel, &lBass, &lSyn, &lDrum, &sCut, &sAtk, &sRel }, 8, 90);
+    }
+
+    void setView (int v)
+    {
+        view = v;
+        (v == 0 ? viewArrange : viewSettings).setToggleState (true, juce::dontSendNotification);
+        for (auto* c : arrangeItems()) c->setVisible (v == 0);
+        for (auto* c : settingsItems()) c->setVisible (v == 1);
+        resized();
+        repaint();
     }
 
 private:
+    std::vector<juce::Component*> arrangeItems() { return { &palette, &timeline, &strip, &roll, &drums }; }
+    std::vector<juce::Component*> settingsItems()
+    {
+        return { &key, &scale, &prog, &bars, &chordLen, &chordKind, &voicing, &rhythm, &smooth, &cOct, &cVel, &cHuman, &cSwing,
+                 &melStyle, &melRange, &mDens, &mRest, &mOct, &mVel, &bassStyle, &drumStyle, &dBusy, &dVel, &synStyle, &sOct, &sVel,
+                 &wChord, &wMel, &wBass, &wSyn, &lChord, &lMel, &lBass, &lSyn, &lDrum, &sCut, &sAtk, &sRel };
+    }
+
+    void timerCallback() override
+    {
+        const juce::String t (aio::tempoHint ((int) proc.apvts.getRawParameterValue ("cmpStyle")->load(), proc.lastBpm.load()));
+        if (hint.getText() != t) hint.setText (t, juce::dontSendNotification);
+    }
+
     AIOProcessor& proc;
-    juce::Rectangle<int> harmony, sChords, sMelody, sBass, sSynth;
+    int view = 0;
+    juce::Rectangle<int> harmony, sChords, sMelody, sBass, sDrums, sSynthPart, sSound;
     Toggle on;
-    juce::TextButton preview, newChords, newMelody, saveBtn;
+    juce::TextButton preview, applyBtn, saveBtn, viewArrange, viewSettings;
     DragMidiButton dragBtn;
-    PianoRollView roll;
+    Combo style;
+    juce::Label hint;
+    ChordPalette palette;
+    ChordTimeline timeline;
+    PartStrip strip;
+    EditableRoll roll;
+    DrumGrid drums;
     Combo key, scale, prog, bars, chordLen, chordKind, voicing, rhythm;
     Toggle smooth;
     Knob cOct, cVel, cHuman, cSwing;
-    Toggle melOn;
     Combo melStyle, melRange;
     Knob mDens, mRest, mOct, mVel;
-    Toggle bassOn;
     Combo bassStyle;
-    Combo wChord, wMel, wBass;
-    Knob lChord, lMel, lBass, sCut, sAtk, sRel;
+    Combo drumStyle;
+    Knob dBusy, dVel;
+    Combo synStyle;
+    Knob sOct, sVel;
+    Combo wChord, wMel, wBass, wSyn;
+    Knob lChord, lMel, lBass, lSyn, lDrum, sCut, sAtk, sRel;
     std::unique_ptr<juce::FileChooser> chooser;
 };
 
@@ -512,6 +595,8 @@ AIOEditor::~AIOEditor()
     stopTimer();
     setLookAndFeel (nullptr);
 }
+
+void AIOEditor::setComposeView (int view) { if (compose) compose->setView (view); }
 
 void AIOEditor::showTab (int index)
 {

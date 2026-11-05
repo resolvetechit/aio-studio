@@ -945,6 +945,9 @@ static void benchMaster()
                  std::chrono::duration<double> (t1 - t0).count(), std::chrono::duration<double> (t2 - t1).count(), st.lufs, st.truePeakDb);
 }
 
+static void prepareVocalSnapshot (AIOProcessor& proc);   // in VocalTests.inc
+static bool selectVocalNote (AIOEditor& ed, int index);
+
 static void snapshots (const juce::File& dir)
 {
     const double sr = 44100;
@@ -994,6 +997,8 @@ static void snapshots (const juce::File& dir)
         if (proc.getMaster().takeResult (ms, rs)) proc.applyMasterSettings (ms);
         proc.getMaster().seek (0.38);
     }
+
+    prepareVocalSnapshot (proc);
 
     AIOEditor ed (proc);
     ed.setSize (1180, 740);
@@ -1067,6 +1072,20 @@ static void snapshots (const juce::File& dir)
         auto img = ed.createComponentSnapshot (ed.getLocalBounds(), true, 1.0f);
         juce::PNGImageFormat png;
         auto f = dir.getChildFile (juce::String (names[t]) + ".png");
+        f.deleteFile();
+        if (auto os = f.createOutputStream()) png.writeImageToStream (img, *os);
+        std::printf ("wrote %s\n", f.getFullPathName().toRawUTF8());
+    }
+
+    // ---- the vocal editor, with a clip, a couple of hand edits and a selection
+    ed.showTab (8);
+    pump (200);
+    if (selectVocalNote (ed, 1))
+    {
+        pump (150);
+        auto img = ed.createComponentSnapshot (ed.getLocalBounds(), true, 1.0f);
+        juce::PNGImageFormat png;
+        auto f = dir.getChildFile ("vocal_edit.png");
         f.deleteFile();
         if (auto os = f.createOutputStream()) png.writeImageToStream (img, *os);
         std::printf ("wrote %s\n", f.getFullPathName().toRawUTF8());
@@ -1494,10 +1513,18 @@ static void testComposeUI()
     }
 }
 
+#include "VocalTests.inc"
+
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI init;
     if (argc > 1 && juce::String (argv[1]) == "--bench") { benchMaster(); return 0; }
+    if (argc > 1 && juce::String (argv[1]) == "--vocal")
+    {
+        testVocalAnalysis(); testVocalRender(); testVocalEditing(); testVocalSession(); testVocalProcessor(); testVocalUI();
+        std::printf ("\n%d checks, %d failed\n", checks, failures);
+        return failures == 0 ? 0 : 1;
+    }
     if (argc > 2 && juce::String (argv[1]) == "--snap") { snapshots (juce::File (argv[2])); return 0; }
     testTheory();
     testComposer();
@@ -1516,6 +1543,12 @@ int main (int argc, char** argv)
     testSing();
     testMasterSession();
     testVoxAndSingProcessor();
+    testVocalAnalysis();
+    testVocalRender();
+    testVocalEditing();
+    testVocalSession();
+    testVocalProcessor();
+    testVocalUI();
     std::printf ("\n%d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

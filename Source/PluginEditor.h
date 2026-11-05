@@ -2,6 +2,8 @@
 #include "ui/Widgets.h"
 #include "ui/Displays.h"
 
+namespace aio::ui { class VocalRoll; }
+
 class AIOEditor : public juce::AudioProcessorEditor,
                   public juce::DragAndDropContainer,
                   private juce::Timer
@@ -15,11 +17,12 @@ public:
 
     void showTab (int index);
     void setComposeView (int view);      // 0 arrange, 1 settings
+    aio::ui::VocalRoll* vocalRoll();     // the note editor of the VOCAL EDIT tab (nullptr in the instrument build); used by tests
 
 private:
     struct PanelBase : public juce::Component {};
     class TunePanel; class EQPanel; class DynPanel; class SpacePanel; class ComposePanel;
-    class MasterPanel; class VoicePanel; class SingPanel;
+    class MasterPanel; class VoicePanel; class SingPanel; class VocalPanel;
 
     void timerCallback() override;
 
@@ -41,6 +44,9 @@ private:
     std::unique_ptr<MasterPanel>  master;       // effect build only
     std::unique_ptr<VoicePanel>   voicePanel;
     std::unique_ptr<SingPanel>    singPanel;
+#if ! JucePlugin_IsSynth
+    std::unique_ptr<VocalPanel>   vocalPanel;
+#endif
     juce::Array<juce::Component*> panels;
     int currentTab = 0;
 

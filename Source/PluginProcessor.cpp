@@ -83,6 +83,7 @@ void AIOProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     guide.prepare (sampleRate);
     learn.prepare (sampleRate);
     master.prepare (sampleRate);
+    vocal.prepare (sampleRate);
 
     tunerWasOn = false;
     wasRunning = wasComposeRun = false;
@@ -530,6 +531,18 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
         if (lastFeelKey.exchange (fk) != fk) { patternDirty = true; triggerAsyncUpdate(); }
     }
 
+    // ---------------------------------------------------------------- vocal editor: record the incoming audio / play the edited clip instead of it
+    bool vocalReplaced = false;
+#if ! JucePlugin_IsSynth
+    {
+        float* vl = buffer.getWritePointer (0);
+        float* vr = buffer.getWritePointer (1);
+        vocal.capture (vl, vr, total, hostPlaying, hostBeat);
+        if (! master.isPlaying())
+            vocalReplaced = vocal.process (vl, vr, total, hostPlaying, hostBeat, bpm, readVocalPlay());
+    }
+#endif
+
     // ---------------------------------------------------------------- parameters, once per block
     const ChainParams cpFull = readChainParams (bpm);
 
@@ -544,7 +557,7 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
     Tx tx;
     tx.fileMode = fileMode;
     tx.fileOriginal = fileMode && master.abOriginal.load();
-    tx.tunerActive = tunerLatencyOn && ! fileMode;
+    tx.tunerActive = tunerLatencyOn && ! fileMode && ! vocalReplaced;
     tx.assist = assistWanted;
     tx.guideOn = singWanted && f ("singGuide") > 0.5f;
     tx.guideLevel = f ("singGuideLvl") * 0.01f;
@@ -969,6 +982,12 @@ void AIOProcessor::getStateInformation (juce::MemoryBlock& dest)
         state.setProperty ("singNotes", juce::String (serializeTrack (*importedTrack)), nullptr);
         state.setProperty ("singLabel", singLabel, nullptr);
     }
+#if ! JucePlugin_IsSynth
+    {
+        const auto blk = vocal.saveState();
+        if (blk.getSize() > 0) state.setProperty ("vedClip", blk.toBase64Encoding(), nullptr);
+    }
+#endif
     if (auto xml = state.createXml()) copyXmlToBinary (*xml, dest);
 }
 
@@ -999,10 +1018,59 @@ void AIOProcessor::setStateInformation (const void* data, int size)
                 auto t = deserializeTrack (notes.toStdString());
                 if (! t.empty()) { importedTrack = std::make_shared<const SingTrack> (std::move (t)); singLabel = vt.getProperty ("singLabel", "Imported MIDI").toString(); }
             }
+#if ! JucePlugin_IsSynth
+            {
+                const auto clip = vt.getProperty ("vedClip", juce::String()).toString();
+                juce::MemoryBlock mb;
+                if (clip.isNotEmpty() && mb.fromBase64Encoding (clip)) vocal.loadState (mb.getData(), mb.getSize());
+                else if (vocal.hasClip()) vocal.clear();
+            }
+#endif
             apvts.replaceState (vt);
             patternDirty = true;
             triggerAsyncUpdate();
         }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Vocal note editor glue
+AutoSettings AIOProcessor::readVocalAuto() const
+{
+    AutoSettings a;
+    a.mask = getEffectiveTunerMask();
+    a.correct = f ("vedCorrect") * 0.01f;
+    a.flatten = f ("vedFlatten") * 0.01f;
+    a.vibrato = f ("vedVibrato") * 0.01f;
+    a.glideMs = f ("vedGlide");
+    a.timing = f ("vedTiming") * 0.01f;
+    static const int grid[4] = { 1, 2, 4, 8 };
+    a.gridPerBeat = grid[std::clamp ((int) f ("vedGrid"), 0, 3)];
+    a.bpm = lastBpm.load();
+    a.gridOffsetSec = 0.0;
+    a.level = f ("vedLevel") * 0.01f;
+    return a;
+}
+
+VocalSession::PlayParams AIOProcessor::readVocalPlay() const
+{
+    VocalSession::PlayParams p;
+    p.follow = f ("vedFollow") > 0.5f;
+    p.loop = f ("vedLoop") > 0.5f;
+    p.original = f ("vedOrig") > 0.5f;
+    p.anchorBeat = f ("vedAnchor");
+    return p;
+}
+
+void AIOProcessor::autoEditVocal (const std::vector<char>* scope)
+{
+    if (! vocal.hasClip()) return;
+    auto& d = vocal.doc();
+    d.checkpoint();
+    const auto a = readVocalAuto();
+    applyAuto (d.notes, a, scope);
+    RenderOptions ro; ro.glideMs = a.glideMs;
+    vocal.setRenderOptions (ro);
+    vocal.notesChanged();
 }
 
 juce::AudioProcessorEditor* AIOProcessor::createEditor() { return new AIOEditor (*this); }

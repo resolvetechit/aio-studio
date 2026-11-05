@@ -958,3 +958,380 @@ private:
     juce::String message;
     std::unique_ptr<juce::FileChooser> chooser;
 };
+
+#if ! JucePlugin_IsSynth
+#include "VocalUI.h"
+
+// =================================================================================================
+// VOCAL EDIT (Melodyne style note editor)
+// =================================================================================================
+class DragVocalButton : public juce::TextButton
+{
+public:
+    explicit DragVocalButton (AIOProcessor& p) : proc (p) { setButtonText ("Drag audio to FL"); }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (! started && e.getDistanceFromDragStart() > 6)
+        {
+            started = true;
+            const auto file = proc.getVocal().dragFile();
+            if (file.existsAsFile())
+                if (auto* c = juce::DragAndDropContainer::findParentDragContainerFor (this))
+                    c->performExternalDragDropOfFiles ({ file.getFullPathName() }, false, this, nullptr);
+        }
+        else if (! started)
+            juce::TextButton::mouseDrag (e);
+    }
+    void mouseUp (const juce::MouseEvent& e) override { started = false; juce::TextButton::mouseUp (e); }
+private:
+    AIOProcessor& proc;
+    bool started = false;
+};
+
+class AIOEditor::VocalPanel : public AIOEditor::PanelBase, private juce::Timer
+{
+public:
+    explicit VocalPanel (AIOProcessor& p)
+        : proc (p), roll (p), dragBtn (p),
+          loopT (p.apvts, "vedLoop", "LOOP", col::bass),
+          followT (p.apvts, "vedFollow", "PLAY WITH PROJECT", col::bass),
+          origT (p.apvts, "vedOrig", "ORIGINAL", col::bass),
+          linkT (p.apvts, "tuneLink", "follow Compose key", col::bass),
+          key (p.apvts, "tuneKey", "Key"), scale (p.apvts, "tuneScale", "Scale"),
+          grid (p.apvts, "vedGrid", "Timing grid"), snap (p.apvts, "vedSnap", "Drag snaps to"),
+          kCorrect (p.apvts, "vedCorrect", "Pitch correct", 0, col::bass),
+          kFlatten (p.apvts, "vedFlatten", "Flatten drift", 0, col::bass),
+          kVibrato (p.apvts, "vedVibrato", "Vibrato", 0, col::bass),
+          kGlide (p.apvts, "vedGlide", "Glide", 0, col::bass),
+          kTiming (p.apvts, "vedTiming", "Timing", 0, col::bass),
+          kLevel (p.apvts, "vedLevel", "Even out level", 0, col::bass),
+          kAnchor (p.apvts, "vedAnchor", "Clip starts at beat", 2, col::bass)
+    {
+        loadBtn.setButtonText ("LOAD...");
+        recBtn.setButtonText ("RECORD");
+        recNowBtn.setButtonText ("REC NOW");
+        stopRecBtn.setButtonText ("STOP REC");
+        playBtn.setButtonText ("PLAY");
+        exportBtn.setButtonText ("EXPORT WAV");
+        autoBtn.setButtonText ("AUTO");
+        recBtn.setTooltip ("Arms the recorder: recording starts when your DAW starts playing and the clip is placed at that beat.");
+        recNowBtn.setTooltip ("Starts recording from the plug-in input right now.");
+        autoBtn.setColour (juce::TextButton::buttonColourId, col::bass.darker (0.25f));
+        autoBtn.setColour (juce::TextButton::textColourOffId, col::bg);
+        playBtn.setColour (juce::TextButton::buttonColourId, col::accent.darker (0.4f));
+
+        for (auto* b : std::initializer_list<juce::Button*> { &snapScale, &snapSemi, &flatBtn, &noVibBtn, &splitBtn, &joinBtn, &muteBtn, &resetBtn, &undoBtn, &redoBtn, &redetBtn })
+            addAndMakeVisible (b);
+        snapScale.setButtonText ("Snap to scale");  snapSemi.setButtonText ("Snap semitone");
+        flatBtn.setButtonText ("Flatten drift");    noVibBtn.setButtonText ("Remove vibrato");
+        splitBtn.setButtonText ("Split at playhead"); joinBtn.setButtonText ("Join with next");
+        muteBtn.setButtonText ("Mute");  resetBtn.setButtonText ("Reset");
+        undoBtn.setButtonText ("Undo");  redoBtn.setButtonText ("Redo");
+        redetBtn.setButtonText ("Detect again");
+
+        for (auto* c : std::initializer_list<juce::Component*> { &roll, &dragBtn, &loadBtn, &recBtn, &recNowBtn, &stopRecBtn, &playBtn, &exportBtn, &autoBtn,
+                                                                  &loopT, &followT, &origT, &linkT, &key, &scale, &grid, &snap,
+                                                                  &kCorrect, &kFlatten, &kVibrato, &kGlide, &kTiming, &kLevel, &kAnchor })
+            addAndMakeVisible (c);
+
+        auto setup = [this] (Insp& s, const juce::String& name, double lo, double hi, double step, const juce::String& suffix)
+        {
+            s.label.setText (name, juce::dontSendNotification);
+            s.label.setFont (juce::Font (juce::FontOptions (11.5f)));
+            s.label.setColour (juce::Label::textColourId, col::dim);
+            s.slider.setSliderStyle (juce::Slider::LinearHorizontal);
+            s.slider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 60, 18);
+            s.slider.setRange (lo, hi, step);
+            s.slider.setTextValueSuffix (suffix);
+            s.slider.setColour (juce::Slider::trackColourId, col::bass);
+            s.slider.setColour (juce::Slider::textBoxTextColourId, col::text);
+            s.slider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+            s.slider.onDragStart = [this] { sliderDragging = true; roll.beginEdit(); autoLive = false; };
+            s.slider.onDragEnd = [this] { sliderDragging = false; };
+            addAndMakeVisible (s.label); addAndMakeVisible (s.slider);
+        };
+        setup (iPitch, "Fine pitch", -50, 50, 1, " c");
+        setup (iDrift, "Pitch drift", 0, 100, 1, " %");
+        setup (iVib, "Vibrato depth", 0, 200, 1, " %");
+        setup (iForm, "Formant", -6, 6, 0.1, " st");
+        setup (iGain, "Note volume", -24, 12, 0.5, " dB");
+        iPitch.slider.onValueChange = [this] { inspectorEdit (0); };
+        iDrift.slider.onValueChange = [this] { inspectorEdit (1); };
+        iVib.slider.onValueChange   = [this] { inspectorEdit (2); };
+        iForm.slider.onValueChange  = [this] { inspectorEdit (3); };
+        iGain.slider.onValueChange  = [this] { inspectorEdit (4); };
+
+        roll.onSelectionChanged = [this] { refreshInspector(); };
+        roll.onEdited = [this] { autoLive = false; if (! sliderDragging) refreshInspector(); };
+
+        loadBtn.onClick = [this] { chooseFile(); };
+        recBtn.onClick = [this] { proc.getVocal().startRecording (true); };
+        recNowBtn.onClick = [this] { proc.getVocal().startRecording (false); };
+        stopRecBtn.onClick = [this] { proc.getVocal().stopRecording(); };
+        playBtn.onClick = [this]
+        {
+            auto& v = proc.getVocal();
+            if (! v.hasClip()) return;
+            if (v.isPlaying()) v.play (false);
+            else { if (v.playheadSeconds() >= v.renderedSeconds() - 0.02) v.seekSeconds (0.0); v.play (true); }
+        };
+        exportBtn.onClick = [this] { chooseExport(); };
+        autoBtn.onClick = [this] { runAuto (true); };
+
+        snapScale.onClick = [this] { roll.snapSelected (2); };
+        snapSemi.onClick  = [this] { roll.snapSelected (1); };
+        flatBtn.onClick   = [this] { roll.editSelected ([] (aio::VocalNote& n) { n.drift = 0.f; }); };
+        noVibBtn.onClick  = [this] { roll.editSelected ([] (aio::VocalNote& n) { n.vib = 0.f; }); };
+        splitBtn.onClick  = [this] { roll.splitAtPlayhead(); };
+        joinBtn.onClick   = [this] { roll.joinSelected(); };
+        muteBtn.onClick   = [this] { roll.toggleMute(); };
+        resetBtn.onClick  = [this] { roll.resetSelected(); };
+        undoBtn.onClick   = [this] { roll.undo(); };
+        redoBtn.onClick   = [this] { roll.redo(); };
+        redetBtn.onClick  = [this]
+        {
+            if (! proc.getVocal().hasClip()) return;
+            proc.getVocal().doc().checkpoint();      // keeps the old notes reachable with Undo
+            proc.getVocal().redetect();
+            autoLive = false;
+        };
+
+        // the auto settings stay live after AUTO has been pressed: moving a knob re-applies them
+        for (auto* k : { &kCorrect, &kFlatten, &kVibrato, &kGlide, &kTiming, &kLevel })
+            k->slider.onValueChange = [this] { markAutoDirty(); };
+        grid.box.onChange = [this] { markAutoDirty(); };
+        key.box.onChange = [this] { markAutoDirty(); };
+        scale.box.onChange = [this] { markAutoDirty(); };
+        linkT.onClick = [this] { markAutoDirty(); };
+
+        refreshInspector();
+        startTimerHz (30);
+    }
+    ~VocalPanel() override { stopTimer(); }
+
+    VocalRoll& getRoll() { return roll; }
+
+    void paint (juce::Graphics& g) override
+    {
+        drawSection (g, autoRect, "Auto edit", col::bass);
+        drawSection (g, inspRect, selText, col::bass);
+
+        auto& v = proc.getVocal();
+        g.setColour (col::dim);
+        g.setFont (juce::Font (juce::FontOptions (12.f)));
+        g.drawFittedText (statusText, statusRect, juce::Justification::centredLeft, 2);
+
+        g.setFont (juce::Font (juce::FontOptions (11.f)));
+        g.drawFittedText (roll.selectedCount() > 0 ? "AUTO changes only the selected notes" : "AUTO changes every note", autoNoteRect, juce::Justification::centred, 2);
+        juce::ignoreUnused (v);
+    }
+
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto bar = b.removeFromTop (32);
+        auto put = [&bar] (juce::Component& c, int w) { c.setBounds (bar.removeFromLeft (w).withTrimmedRight (6)); };
+        put (loadBtn, 84); put (recBtn, 84); put (recNowBtn, 84); put (stopRecBtn, 84);
+        bar.removeFromLeft (10);
+        put (playBtn, 70); put (loopT, 66); put (followT, 166); put (origT, 100);
+        bar.removeFromLeft (4);
+        put (exportBtn, 104); put (dragBtn, 124);
+        statusRect = bar.withTrimmedLeft (6);
+
+        b.removeFromTop (6);
+        autoRect = b.removeFromTop (136);
+        b.removeFromTop (6);
+        inspRect = b.removeFromBottom (108);
+        b.removeFromBottom (6);
+        roll.setBounds (b);
+
+        // auto section
+        auto a = autoRect.reduced (14, 32);
+        auto left = a.removeFromLeft (128);
+        autoBtn.setBounds (left.removeFromTop (46));
+        autoNoteRect = left.withTrimmedTop (2);
+        a.removeFromLeft (10);
+        auto kc = a.removeFromLeft (150);
+        key.setBounds (kc.removeFromTop (28)); kc.removeFromTop (2);
+        scale.setBounds (kc.removeFromTop (28)); kc.removeFromTop (2);
+        linkT.setBounds (kc.removeFromTop (22));
+        a.removeFromLeft (8);
+        auto rightCol = a.removeFromRight (150);
+        grid.setBounds (rightCol.removeFromTop (28)); rightCol.removeFromTop (2);
+        snap.setBounds (rightCol.removeFromTop (28));
+        a.removeFromRight (6);
+        const int kw = a.getWidth() / 7;
+        for (auto* k : { &kCorrect, &kFlatten, &kVibrato, &kGlide, &kTiming, &kLevel, &kAnchor })
+            k->setBounds (a.removeFromLeft (kw));
+
+        // inspector
+        auto r = inspRect.reduced (14, 30);
+        auto btns = r.removeFromRight (500);
+        r.removeFromRight (14);
+        const int colW = r.getWidth() / 2;
+        Insp* order[5] = { &iPitch, &iDrift, &iVib, &iForm, &iGain };
+        for (int i = 0; i < 5; ++i)
+        {
+            auto cell = juce::Rectangle<int> (r.getX() + (i / 3) * colW, r.getY() + (i % 3) * 24, colW - 14, 24);
+            order[i]->label.setBounds (cell.removeFromLeft (96));
+            order[i]->slider.setBounds (cell);
+        }
+        juce::Button* bb[11] = { &snapScale, &snapSemi, &flatBtn, &noVibBtn, &muteBtn, &splitBtn, &joinBtn, &resetBtn, &undoBtn, &redoBtn, &redetBtn };
+        const int bw = btns.getWidth() / 4;
+        for (int i = 0; i < 11; ++i)
+            bb[i]->setBounds (btns.getX() + (i % 4) * bw, btns.getY() + (i / 4) * 24, bw - 6, 22);
+    }
+
+    // ---- driven by tests too
+    void runAuto (bool fresh)
+    {
+        auto& v = proc.getVocal();
+        if (! v.hasClip()) return;
+        const bool hasSel = roll.selectedCount() > 0;
+        if (hasSel) liveScope = roll.selection(); else liveScope.clear();
+        if (! fresh && ! v.doc().undoStack.empty())
+        {                                           // live re-apply: replace the previous auto step instead of stacking another one
+            v.doc().notes = v.doc().undoStack.back();
+            v.doc().undoStack.pop_back();
+        }
+        proc.autoEditVocal (hasSel ? &liveScope : nullptr);
+        autoLive = true;
+        roll.repaint();
+    }
+    bool isAutoLive() const { return autoLive; }
+    void inspectorEdit (int which)
+    {
+        if (refreshing || roll.selectedCount() == 0) return;
+        if (! sliderDragging) roll.beginEdit();
+        autoLive = false;
+        auto& notes = proc.getVocal().doc().notes;
+        const int first = roll.firstSelected();
+        const double curCents = (notes[(size_t) first].target - std::round (notes[(size_t) first].target)) * 100.0;
+        const float v = (float) (which == 0 ? iPitch.slider.getValue() : which == 1 ? iDrift.slider.getValue() : which == 2 ? iVib.slider.getValue()
+                              : which == 3 ? iForm.slider.getValue() : iGain.slider.getValue());
+        const float delta = (float) ((v - curCents) * 0.01);
+        roll.applyToSelected ([which, v, delta] (aio::VocalNote& n)
+        {
+            switch (which)
+            {
+                case 0: n.target += delta; break;
+                case 1: n.drift = v * 0.01f; break;
+                case 2: n.vib = v * 0.01f; break;
+                case 3: n.formant = v; break;
+                default: n.gainDb = v; break;
+            }
+        });
+        roll.commit();
+    }
+
+private:
+    struct Insp { juce::Label label; juce::Slider slider; };
+
+    void markAutoDirty() { if (autoLive) autoDirtyAt = juce::Time::getMillisecondCounter(); }
+
+    void refreshInspector()
+    {
+        auto& v = proc.getVocal();
+        const int n = roll.selectedCount();
+        const int first = roll.firstSelected();
+        refreshing = true;
+        const bool on = n > 0 && first >= 0 && (size_t) first < v.doc().notes.size();
+        for (auto* s : { &iPitch, &iDrift, &iVib, &iForm, &iGain }) s->slider.setEnabled (on);
+        for (auto* b : std::initializer_list<juce::Button*> { &snapScale, &snapSemi, &flatBtn, &noVibBtn, &muteBtn, &splitBtn, &joinBtn, &resetBtn })
+            b->setEnabled (b == &splitBtn ? v.hasClip() : on);
+        if (on)
+        {
+            const auto& nt = v.doc().notes[(size_t) first];
+            iPitch.slider.setValue ((nt.target - std::round (nt.target)) * 100.0, juce::dontSendNotification);
+            iDrift.slider.setValue (nt.drift * 100.0, juce::dontSendNotification);
+            iVib.slider.setValue (nt.vib * 100.0, juce::dontSendNotification);
+            iForm.slider.setValue (nt.formant, juce::dontSendNotification);
+            iGain.slider.setValue (nt.gainDb, juce::dontSendNotification);
+            selText = n == 1 ? "Selected note:  " + aio::ui::noteLabel (nt.target, true) + "   (" + juce::String (nt.newLen(), 2) + " s)"
+                             : juce::String (n) + " notes selected  (sliders change all of them)";
+        }
+        else selText = v.hasClip() ? "Select a note to fine tune it  (click, or drag a box around several)" : "Notes";
+        refreshing = false;
+        undoBtn.setEnabled (! v.doc().undoStack.empty());
+        redoBtn.setEnabled (! v.doc().redoStack.empty());
+        repaint (inspRect);
+    }
+
+    void timerCallback() override
+    {
+        auto& v = proc.getVocal();
+        if (v.poll())
+        {
+            if (v.takeNewClip()) { roll.clipChanged(); autoLive = false; }
+            roll.repaint();
+            refreshInspector();
+        }
+        double beat = 0.0;
+        if (v.takeAnchor (beat)) proc.setParam ("vedAnchor", (float) beat);
+
+        if (autoLive && autoDirtyAt != 0 && juce::Time::getMillisecondCounter() - autoDirtyAt > 150)
+        {
+            autoDirtyAt = 0;
+            runAuto (false);
+        }
+
+        const int rm = v.recMode();
+        juce::String s;
+        if (rm == aio::VocalSession::RecArmed) s = "Armed: press play in your DAW to start recording";
+        else if (rm == aio::VocalSession::RecRecording) s = "Recording...  " + juce::String (v.recSeconds(), 1) + " s  (press STOP REC or stop the DAW)";
+        else if (v.busy()) s = v.status();
+        else if (! exportNote.isEmpty()) s = exportNote;
+        else if (v.hasClip()) s = v.status().isNotEmpty() ? v.status() : juce::String ("Clip: ") + juce::String (v.clipSeconds(), 1) + " s,  " + juce::String ((int) v.doc().notes.size()) + " notes";
+        else s = "Load a vocal or record one";
+        if (s != statusText) { statusText = s; repaint (statusRect); }
+
+        playBtn.setButtonText (v.isPlaying() ? "STOP" : "PLAY");
+        const bool idle = rm == aio::VocalSession::RecIdle;
+        recBtn.setEnabled (idle); recNowBtn.setEnabled (idle); stopRecBtn.setEnabled (! idle);
+        loadBtn.setEnabled (idle);
+        exportBtn.setEnabled (v.hasClip());
+        dragBtn.setEnabled (v.hasClip());
+        autoBtn.setEnabled (v.hasClip() && ! v.busy());
+    }
+
+    void chooseFile()
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Choose a vocal to edit", juce::File(), "*.wav;*.mp3;*.flac;*.aif;*.aiff;*.ogg");
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this] (const juce::FileChooser& fc)
+        {
+            const auto f = fc.getResult();
+            if (f.existsAsFile()) { exportNote.clear(); proc.getVocal().play (false); proc.getVocal().loadFile (f); }
+        });
+    }
+
+    void chooseExport()
+    {
+        if (! proc.getVocal().hasClip()) return;
+        chooser = std::make_unique<juce::FileChooser> ("Export the edited vocal", juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("Vocal edit.wav"), "*.wav");
+        chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting, [this] (const juce::FileChooser& fc)
+        {
+            auto f = fc.getResult();
+            if (f == juce::File()) return;
+            if (! f.hasFileExtension ("wav")) f = f.withFileExtension ("wav");
+            const auto r = proc.getVocal().exportWav (f);
+            exportNote = r.wasOk() ? "Saved " + f.getFileName() : "Could not save: " + r.getErrorMessage();
+        });
+    }
+
+    AIOProcessor& proc;
+    aio::ui::VocalRoll roll;
+    DragVocalButton dragBtn;
+    juce::TextButton loadBtn, recBtn, recNowBtn, stopRecBtn, playBtn, exportBtn, autoBtn;
+    juce::TextButton snapScale, snapSemi, flatBtn, noVibBtn, splitBtn, joinBtn, muteBtn, resetBtn, undoBtn, redoBtn, redetBtn;
+    Toggle loopT, followT, origT, linkT;
+    Combo key, scale, grid, snap;
+    Knob kCorrect, kFlatten, kVibrato, kGlide, kTiming, kLevel, kAnchor;
+    Insp iPitch, iDrift, iVib, iForm, iGain;
+    juce::Rectangle<int> autoRect, inspRect, statusRect, autoNoteRect;
+    juce::String statusText, selText { "Notes" }, exportNote;
+    std::vector<char> liveScope;
+    bool autoLive = false, sliderDragging = false, refreshing = false;
+    juce::uint32 autoDirtyAt = 0;
+    std::unique_ptr<juce::FileChooser> chooser;
+};
+#endif

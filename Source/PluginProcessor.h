@@ -16,6 +16,7 @@
 #include "master/MasterEngine.h"
 #include "master/MasterSession.h"
 #include "sing/Sing.h"
+#include "vocal/VocalSession.h"
 
 class AIOProcessor : public juce::AudioProcessor,
                      private juce::AsyncUpdater,
@@ -117,6 +118,12 @@ public:
     bool getLearnResult (aio::MasterAnalysis& a, aio::MasterSettings& s) const;
     aio::ChainParams readChainParams (double bpm) const;
 
+    // ---- Vocal note editor (effect build)
+    aio::VocalSession&  getVocal() { return vocal; }
+    aio::AutoSettings   readVocalAuto() const;
+    aio::VocalSession::PlayParams readVocalPlay() const;
+    void autoEditVocal (const std::vector<char>* scope = nullptr);   // message thread: one-click correction of the notes
+
 private:
     static BusesProperties makeBuses();
     struct Tx;
@@ -187,6 +194,7 @@ private:
 
     // Auto Master
     aio::MasterSession master;
+    aio::VocalSession vocal;
     aio::LiveLearn learn;
     mutable juce::CriticalSection learnLock;
     aio::MasterAnalysis learnAnalysis; aio::MasterSettings learnSettings; bool haveLearn = false;

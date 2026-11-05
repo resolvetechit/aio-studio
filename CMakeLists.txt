@@ -33,7 +33,9 @@ set(AIO_SOURCES
     Source/compose/Styles.cpp
     Source/master/MasterEngine.cpp
     Source/master/MasterSession.cpp
-    Source/sing/Sing.cpp)
+    Source/sing/Sing.cpp
+    Source/vocal/VocalEngine.cpp
+    Source/vocal/VocalSession.cpp)
 
 option(AIO_LTO "Link-time optimisation (slower build, slightly faster plugin)" OFF)
 

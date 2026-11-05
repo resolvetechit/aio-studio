@@ -552,12 +552,13 @@ AIOEditor::AIOEditor (AIOProcessor& p) : AudioProcessorEditor (&p), proc (p)
     master     = std::make_unique<MasterPanel> (p);
     voicePanel = std::make_unique<VoicePanel> (p);
     singPanel  = std::make_unique<SingPanel> (p);
-    panels.add (master.get()); panels.add (voicePanel.get()); panels.add (singPanel.get());
+    vocalPanel = std::make_unique<VocalPanel> (p);
+    panels.add (master.get()); panels.add (voicePanel.get()); panels.add (singPanel.get()); panels.add (vocalPanel.get());
 #endif
     for (auto* c : panels) addChildComponent (c);
 
-    static const char* names[8] = { "TUNE", "EQ", "DYNAMICS + SAT", "SPACE", "COMPOSE", "MASTER", "VOICE", "SING" };
-    static const juce::Colour tabColours[8] = { col::accent, col::accent, col::accent, col::accent2, col::violet, col::accent2, col::chords, col::melody };
+    static const char* names[9] = { "TUNE", "EQ", "DYNAMICS + SAT", "SPACE", "COMPOSE", "MASTER", "VOICE", "SING", "VOCAL EDIT" };
+    static const juce::Colour tabColours[9] = { col::accent, col::accent, col::accent, col::accent2, col::violet, col::accent2, col::chords, col::melody, col::bass };
     for (int i = 0; i < panels.size(); ++i)
     {
         auto* b = tabButtons.add (new juce::TextButton (names[i]));
@@ -598,6 +599,15 @@ AIOEditor::~AIOEditor()
 
 void AIOEditor::setComposeView (int view) { if (compose) compose->setView (view); }
 
+aio::ui::VocalRoll* AIOEditor::vocalRoll()
+{
+#if ! JucePlugin_IsSynth
+    return vocalPanel ? &vocalPanel->getRoll() : nullptr;
+#else
+    return nullptr;
+#endif
+}
+
 void AIOEditor::showTab (int index)
 {
     currentTab = index;
@@ -626,7 +636,7 @@ void AIOEditor::paint (juce::Graphics& g)
     #if JucePlugin_IsSynth
     g.drawText ("tune  /  eq  /  dynamics  /  space  /  compose", 20, 58, 300, 16, juce::Justification::centredLeft);
 #else
-    g.drawText ("tune / eq / dynamics / space / compose / master / voice / sing", 20, 58, 420, 16, juce::Justification::centredLeft);
+    g.drawText ("tune / eq / dynamics / space / compose / master / voice / sing / vocal edit", 20, 58, 420, 16, juce::Justification::centredLeft);
 #endif
 }
 
@@ -646,7 +656,7 @@ void AIOEditor::resized()
     presetBox.setBounds (top.removeFromLeft (560).withTrimmedLeft (330).withHeight (28).translated (0, 22));
 
     auto tabs = b.removeFromTop (34).reduced (16, 0);
-    const int tw = panels.size() > 5 ? 143 : 150;
+    const int tw = std::min (panels.size() > 5 ? 143 : 150, tabs.getWidth() / std::max (1, panels.size()));
     for (auto* t : tabButtons) { t->setBounds (tabs.removeFromLeft (tw).withTrimmedRight (6)); }
 
     b.removeFromTop (8);

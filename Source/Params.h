@@ -267,6 +267,20 @@ inline Layout createLayout()
     addF (l, "singGuideLvl", "Guide Level", 0.f, 100.f, 50.f, 0.f, 1.f, "%");
     addB (l, "singAssist",   "Assist: Pull Voice To Melody", false);
 
+    // ---- vocal note editor ----
+    addB (l, "vedFollow",  "Vocal Edit Play With Project", true);
+    addB (l, "vedLoop",    "Vocal Edit Loop", true);
+    addB (l, "vedOrig",    "Vocal Edit Play Original", false);
+    addF (l, "vedAnchor",  "Vocal Clip Start", 0.f, 2048.f, 0.f, 0.f, 0.01f, "beats");
+    addF (l, "vedCorrect", "Vocal Auto Correct", 0.f, 100.f, 100.f, 0.f, 1.f, "%");
+    addF (l, "vedFlatten", "Vocal Auto Flatten Drift", 0.f, 100.f, 40.f, 0.f, 1.f, "%");
+    addF (l, "vedVibrato", "Vocal Auto Vibrato", 0.f, 200.f, 100.f, 0.f, 1.f, "%");
+    addF (l, "vedGlide",   "Vocal Auto Glide", 0.f, 150.f, 15.f, 0.f, 1.f, "ms");
+    addF (l, "vedTiming",  "Vocal Auto Timing", 0.f, 100.f, 0.f, 0.f, 1.f, "%");
+    addC (l, "vedGrid",    "Vocal Auto Timing Grid", { "1/4", "1/8", "1/16", "1/32" }, 1);
+    addF (l, "vedLevel",   "Vocal Auto Level Notes", 0.f, 100.f, 0.f, 0.f, 1.f, "%");
+    addC (l, "vedSnap",    "Vocal Edit Snap", { "Off", "Semitone", "Scale" }, 1);
+
     return l;
 }
 } // namespace aio

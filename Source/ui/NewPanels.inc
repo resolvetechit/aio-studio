@@ -1335,3 +1335,139 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
 };
 #endif
+
+#if ! JucePlugin_IsSynth
+#include "TalkUI.h"
+
+// =================================================================================================
+// TALK BOX
+// =================================================================================================
+class AIOEditor::TalkPanel : public AIOEditor::PanelBase
+{
+public:
+    explicit TalkPanel (AIOProcessor& p)
+        : proc (p), mouth (p), keys (p),
+          onT (p.apvts, "tbOn", "TALK BOX ON", aio::ui::talkCol),
+          latchT (p.apvts, "tbLatch", "Latch keys", aio::ui::talkCol),
+          muteT (p.apvts, "tbMuteSyn", "Mute Compose synth", aio::ui::talkCol),
+          linkT (p.apvts, "tuneLink", "follow Compose key", aio::ui::talkCol),
+          source (p.apvts, "tbSource", "Notes come from"), wave (p.apvts, "tbWave", "Synth sound"),
+          part (p.apvts, "tbPart", "Compose part"), key (p.apvts, "tuneKey", "Key"), scale (p.apvts, "tuneScale", "Scale"),
+          kOct (p.apvts, "tbOctave", "Octave", 0, aio::ui::talkCol), kGlide (p.apvts, "tbGlide", "Glide", 0, aio::ui::talkCol),
+          kVibRate (p.apvts, "tbVibRate", "Vibrato rate", 1, aio::ui::talkCol), kVibDepth (p.apvts, "tbVibDepth", "Vibrato depth", 0, aio::ui::talkCol),
+          kSub (p.apvts, "tbSub", "Sub octave", 0, aio::ui::talkCol), kBright (p.apvts, "tbCarTone", "Synth brightness", 0, aio::ui::talkCol),
+          kSharp (p.apvts, "tbSharp", "Vowel sharpness", 0, aio::ui::talkCol), kShift (p.apvts, "tbShift", "Mouth size", 1, aio::ui::talkCol),
+          kPresence (p.apvts, "tbPresence", "Presence", 0, aio::ui::talkCol), kCons (p.apvts, "tbCons", "Consonants", 0, aio::ui::talkCol),
+          kDyn (p.apvts, "tbDyn", "Follow loudness", 0, aio::ui::talkCol), kGate (p.apvts, "tbGate", "Gate", 0, aio::ui::talkCol),
+          kDrive (p.apvts, "tbDrive", "Drive", 0, aio::ui::talkCol), kTone (p.apvts, "tbTone", "Tone", 0, aio::ui::talkCol),
+          kMix (p.apvts, "tbMix", "Mix (wet)", 0, aio::ui::talkCol), kLevel (p.apvts, "tbLevel", "Level", 1, aio::ui::talkCol),
+          kSnap (p.apvts, "tbSnap", "Snap to scale", 0, aio::ui::talkCol), kFixed (p.apvts, "tbFixed", "Fixed note", 0, aio::ui::talkCol)
+    {
+        for (auto* c : std::initializer_list<juce::Component*> { &mouth, &keys, &onT, &latchT, &muteT, &linkT, &source, &wave, &part, &key, &scale,
+                                                                  &kOct, &kGlide, &kVibRate, &kVibDepth, &kSub, &kBright, &kSharp, &kShift, &kPresence, &kCons, &kDyn, &kGate,
+                                                                  &kDrive, &kTone, &kMix, &kLevel, &kSnap, &kFixed, &presetBox, &hint })
+            addAndMakeVisible (c);
+
+        kFixed.slider.textFromValueFunction = [] (double v) { return aio::ui::talkNoteName (v); };
+        kFixed.slider.updateText();
+        kOct.slider.textFromValueFunction = [] (double v) { return (v > 0 ? "+" : "") + juce::String ((int) v); };
+        kOct.slider.updateText();
+
+        presetBox.setTextWhenNothingSelected ("Presets...");
+        for (int i = 0; i < AIOProcessor::talkPresetCount(); ++i) presetBox.addItem (AIOProcessor::talkPresetName (i), i + 1);
+        presetBox.onChange = [this]
+        {
+            const int id = presetBox.getSelectedId();
+            if (id > 0) proc.applyTalkPreset (id - 1);
+            presetBox.setSelectedId (0, juce::dontSendNotification);
+        };
+
+        hint.setText ("Speak or rap into the mic (use headphones) and play notes: your mouth shapes the synth.", juce::dontSendNotification);
+        hint.setFont (juce::Font (juce::FontOptions (12.f)));
+        hint.setColour (juce::Label::textColourId, col::dim);
+        hint.setJustificationType (juce::Justification::centredLeft);
+        hint.setMinimumHorizontalScale (0.7f);
+    }
+
+    aio::ui::TalkKeys& getKeys() { return keys; }
+
+    void paint (juce::Graphics& g) override
+    {
+        drawSection (g, synthRect, "Synth lead", aio::ui::talkCol);
+        drawSection (g, mouthRect, "Mouth (your voice shapes the sound)", aio::ui::talkCol);
+        drawSection (g, outRect, "Output", aio::ui::talkCol);
+        drawSection (g, notesRect, "Notes", aio::ui::talkCol);
+    }
+
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto bar = b.removeFromTop (34);
+        onT.setBounds (bar.removeFromLeft (170).withTrimmedRight (8));
+        presetBox.setBounds (bar.removeFromLeft (190).reduced (0, 3).withTrimmedRight (8));
+        hint.setBounds (bar.withTrimmedLeft (4));
+        b.removeFromTop (6);
+
+        const int rowH = 152;
+        auto r1 = b.removeFromTop (rowH); b.removeFromTop (6);
+        auto r2 = b.removeFromTop (rowH); b.removeFromTop (6);
+        notesRect = b;
+
+        mouth.setBounds (r1.removeFromLeft (r1.getWidth() * 4 / 10).reduced (0, 0));
+        r1.removeFromLeft (8);
+        synthRect = r1;
+        {
+            auto a = synthRect.reduced (14, 32);
+            wave.setBounds (a.removeFromLeft (130).removeFromTop (30));
+            a.removeFromLeft (8);
+            const int kw = a.getWidth() / 5;
+            for (auto* k : { &kOct, &kGlide, &kVibRate, &kVibDepth, &kSub }) k->setBounds (a.removeFromLeft (kw));
+            // brightness sits under the wave box
+            kBright.setBounds (synthRect.getX() + 10, synthRect.getY() + 64, 140, synthRect.getHeight() - 70);
+        }
+        mouthRect = r2.removeFromLeft (r2.getWidth() * 6 / 10 - 4);
+        r2.removeFromLeft (8);
+        outRect = r2;
+        {
+            auto a = mouthRect.reduced (14, 32);
+            const int kw = a.getWidth() / 6;
+            for (auto* k : { &kSharp, &kShift, &kPresence, &kCons, &kDyn, &kGate }) k->setBounds (a.removeFromLeft (kw));
+            auto o = outRect.reduced (14, 32);
+            const int ow = o.getWidth() / 4;
+            for (auto* k : { &kDrive, &kTone, &kMix, &kLevel }) k->setBounds (o.removeFromLeft (ow));
+        }
+        {
+            auto a = notesRect.reduced (14, 32);
+            auto side = a.removeFromRight (juce::jmin (330, a.getWidth() / 3));
+            a.removeFromRight (12);
+            keys.setBounds (a);
+            source.setBounds (side.removeFromTop (30)); side.removeFromTop (4);
+            auto row = side.removeFromTop (28);
+            latchT.setBounds (row.removeFromLeft (row.getWidth() / 2));
+            muteT.setBounds (row);
+            side.removeFromTop (2);
+            auto row2 = side.removeFromTop (30);
+            part.setBounds (row2.removeFromLeft (row2.getWidth() / 2 - 4)); row2.removeFromLeft (8);
+            key.setBounds (row2);
+            side.removeFromTop (4);
+            auto row3 = side.removeFromTop (30);
+            scale.setBounds (row3.removeFromLeft (row3.getWidth() / 2 - 4)); row3.removeFromLeft (8);
+            linkT.setBounds (row3.withTrimmedTop (8));
+            auto kk = side;
+            kSnap.setBounds (kk.removeFromLeft (kk.getWidth() / 2));
+            kFixed.setBounds (kk);
+        }
+    }
+
+private:
+    AIOProcessor& proc;
+    aio::ui::MouthView mouth;
+    aio::ui::TalkKeys keys;
+    Toggle onT, latchT, muteT, linkT;
+    Combo source, wave, part, key, scale;
+    Knob kOct, kGlide, kVibRate, kVibDepth, kSub, kBright, kSharp, kShift, kPresence, kCons, kDyn, kGate, kDrive, kTone, kMix, kLevel, kSnap, kFixed;
+    juce::ComboBox presetBox;
+    juce::Label hint;
+    juce::Rectangle<int> synthRect, mouthRect, outRect, notesRect;
+};
+#endif

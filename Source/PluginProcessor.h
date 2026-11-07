@@ -11,6 +11,7 @@
 #include "dsp/Synth.h"
 #include "dsp/Guide.h"
 #include "dsp/PitchDetector.h"
+#include "dsp/TalkBox.h"
 #include "compose/Composer.h"
 #include "compose/Styles.h"
 #include "master/MasterEngine.h"
@@ -37,7 +38,7 @@ public:
     bool hasEditor() const override { return true; }
 
     const juce::String getName() const override { return JucePlugin_Name; }
-    bool acceptsMidi() const override  { return JucePlugin_IsSynth != 0; }
+    bool acceptsMidi() const override  { return true; }   // instrument build: unused; effect build: keys for the talk box
     bool producesMidi() const override { return JucePlugin_ProducesMidiOutput != 0; }
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 4.0; }
@@ -124,6 +125,14 @@ public:
     aio::VocalSession::PlayParams readVocalPlay() const;
     void autoEditVocal (const std::vector<char>* scope = nullptr);   // message thread: one-click correction of the notes
 
+    // ---- Talk box (effect build)
+    aio::TalkBox&       getTalk() { return talk; }
+    aio::TalkSettings   readTalkSettings() const;
+    void setTalkKey (int note)  { talkKey.store (note); }            // on-screen key (-1 = released)
+    static int  talkPresetCount();
+    static const char* talkPresetName (int index);
+    void applyTalkPreset (int index);                                // message thread
+
 private:
     static BusesProperties makeBuses();
     struct Tx;
@@ -138,6 +147,14 @@ private:
     float f (const char* id) const { return apvts.getRawParameterValue (id)->load(); }
     float f (const juce::String& id) const { return apvts.getRawParameterValue (id)->load(); }
     void  releaseAllNotes (juce::MidiBuffer& midi, int sample);
+
+    // talk box
+    aio::TalkBox talk;
+    std::atomic<int> talkKey { -1 };
+    int talkKeyApplied = -1, talkSourceApplied = -1;
+    struct TbEvt { int sample; int kind; int a; int b; };          // kind: 0 off, 1 on, 2 bend (a = -8192..8191), 3 mod (a = 0..127), 4 all off
+    std::array<TbEvt, 256> tbEv {};
+    int tbEvN = 0;
 
     // cached raw parameter pointers (no string work on the audio thread)
     std::array<std::array<std::atomic<float>*, 5>, 6> eqPtr {};

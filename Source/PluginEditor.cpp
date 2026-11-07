@@ -553,12 +553,13 @@ AIOEditor::AIOEditor (AIOProcessor& p) : AudioProcessorEditor (&p), proc (p)
     voicePanel = std::make_unique<VoicePanel> (p);
     singPanel  = std::make_unique<SingPanel> (p);
     vocalPanel = std::make_unique<VocalPanel> (p);
-    panels.add (master.get()); panels.add (voicePanel.get()); panels.add (singPanel.get()); panels.add (vocalPanel.get());
+    talkPanel  = std::make_unique<TalkPanel> (p);
+    panels.add (master.get()); panels.add (voicePanel.get()); panels.add (singPanel.get()); panels.add (vocalPanel.get()); panels.add (talkPanel.get());
 #endif
     for (auto* c : panels) addChildComponent (c);
 
-    static const char* names[9] = { "TUNE", "EQ", "DYNAMICS + SAT", "SPACE", "COMPOSE", "MASTER", "VOICE", "SING", "VOCAL EDIT" };
-    static const juce::Colour tabColours[9] = { col::accent, col::accent, col::accent, col::accent2, col::violet, col::accent2, col::chords, col::melody, col::bass };
+    static const char* names[10] = { "TUNE", "EQ", "DYN + SAT", "SPACE", "COMPOSE", "MASTER", "VOICE", "SING", "VOCAL EDIT", "TALK BOX" };
+    static const juce::Colour tabColours[10] = { col::accent, col::accent, col::accent, col::accent2, col::violet, col::accent2, col::chords, col::melody, col::bass, juce::Colour (0xfff2a03d) };
     for (int i = 0; i < panels.size(); ++i)
     {
         auto* b = tabButtons.add (new juce::TextButton (names[i]));
@@ -599,6 +600,15 @@ AIOEditor::~AIOEditor()
 
 void AIOEditor::setComposeView (int view) { if (compose) compose->setView (view); }
 
+aio::ui::TalkKeys* AIOEditor::talkKeys()
+{
+#if ! JucePlugin_IsSynth
+    return talkPanel ? &talkPanel->getKeys() : nullptr;
+#else
+    return nullptr;
+#endif
+}
+
 aio::ui::VocalRoll* AIOEditor::vocalRoll()
 {
 #if ! JucePlugin_IsSynth
@@ -636,7 +646,7 @@ void AIOEditor::paint (juce::Graphics& g)
     #if JucePlugin_IsSynth
     g.drawText ("tune  /  eq  /  dynamics  /  space  /  compose", 20, 58, 300, 16, juce::Justification::centredLeft);
 #else
-    g.drawText ("tune / eq / dynamics / space / compose / master / voice / sing / vocal edit", 20, 58, 420, 16, juce::Justification::centredLeft);
+    g.drawText ("tune / eq / dynamics / space / compose / master / voice / sing / vocal edit / talk box", 20, 58, 420, 16, juce::Justification::centredLeft);
 #endif
 }
 

@@ -281,6 +281,32 @@ inline Layout createLayout()
     addF (l, "vedLevel",   "Vocal Auto Level Notes", 0.f, 100.f, 0.f, 0.f, 1.f, "%");
     addC (l, "vedSnap",    "Vocal Edit Snap", { "Off", "Semitone", "Scale" }, 1);
 
+    // ---- talk box ----
+    addB (l, "tbOn",       "Talk Box On", false);
+    addC (l, "tbSource",   "Talk Box Notes From", { "Voice pitch", "MIDI / keys", "Compose", "Fixed note" }, 1);
+    addC (l, "tbWave",     "Talk Box Synth", { "Saw lead", "Pulse", "Super saw", "Square" }, 0);
+    addI (l, "tbOctave",   "Talk Box Octave", -2, 2, 0);
+    addF (l, "tbGlide",    "Talk Box Glide", 0.f, 500.f, 60.f, 0.f, 1.f, "ms");
+    addF (l, "tbVibRate",  "Talk Box Vibrato Rate", 3.f, 9.f, 5.5f, 0.f, 0.1f, "Hz");
+    addF (l, "tbVibDepth", "Talk Box Vibrato Depth", 0.f, 100.f, 12.f, 0.f, 1.f, "cents");
+    addF (l, "tbSub",      "Talk Box Sub Octave", 0.f, 100.f, 30.f, 0.f, 1.f, "%");
+    addF (l, "tbCarTone",  "Talk Box Synth Brightness", 500.f, 16000.f, 9000.f, 3000.f, 10.f, "Hz");
+    addF (l, "tbSharp",    "Talk Box Vowel Sharpness", 0.f, 100.f, 60.f, 0.f, 1.f, "%");
+    addF (l, "tbShift",    "Talk Box Mouth Size", -6.f, 6.f, 0.f, 0.f, 0.1f, "st");
+    addF (l, "tbPresence", "Talk Box Presence", 0.f, 100.f, 60.f, 0.f, 1.f, "%");
+    addF (l, "tbCons",     "Talk Box Consonants", 0.f, 100.f, 60.f, 0.f, 1.f, "%");
+    addF (l, "tbDyn",      "Talk Box Follow Loudness", 0.f, 100.f, 50.f, 0.f, 1.f, "%");
+    addF (l, "tbGate",     "Talk Box Gate", -80.f, -20.f, -52.f, 0.f, 0.5f, "dB");
+    addF (l, "tbDrive",    "Talk Box Drive", 0.f, 100.f, 25.f, 0.f, 1.f, "%");
+    addF (l, "tbTone",     "Talk Box Tone", 1000.f, 16000.f, 7000.f, 4000.f, 10.f, "Hz");
+    addF (l, "tbMix",      "Talk Box Mix", 0.f, 100.f, 100.f, 0.f, 1.f, "%");
+    addF (l, "tbLevel",    "Talk Box Level", -24.f, 12.f, 0.f, 0.f, 0.1f, "dB");
+    addF (l, "tbSnap",     "Talk Box Snap To Scale", 0.f, 100.f, 100.f, 0.f, 1.f, "%");
+    addI (l, "tbFixed",    "Talk Box Fixed Note", 24, 96, 60);
+    addB (l, "tbLatch",    "Talk Box Latch Keys", false);
+    addC (l, "tbPart",     "Talk Box Compose Part", { "Melody", "Synth / arp", "Bass" }, 0);
+    addB (l, "tbMuteSyn",  "Talk Box Mute Compose Synth", true);
+
     return l;
 }
 } // namespace aio

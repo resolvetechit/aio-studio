@@ -947,6 +947,7 @@ static void benchMaster()
 
 static void prepareVocalSnapshot (AIOProcessor& proc);   // in VocalTests.inc
 static bool selectVocalNote (AIOEditor& ed, int index);
+static void prepareTalkSnapshot (AIOProcessor& proc);   // in TalkTests.inc
 
 static void snapshots (const juce::File& dir)
 {
@@ -999,6 +1000,7 @@ static void snapshots (const juce::File& dir)
     }
 
     prepareVocalSnapshot (proc);
+    prepareTalkSnapshot (proc);
 
     AIOEditor ed (proc);
     ed.setSize (1180, 740);
@@ -1072,6 +1074,18 @@ static void snapshots (const juce::File& dir)
         auto img = ed.createComponentSnapshot (ed.getLocalBounds(), true, 1.0f);
         juce::PNGImageFormat png;
         auto f = dir.getChildFile (juce::String (names[t]) + ".png");
+        f.deleteFile();
+        if (auto os = f.createOutputStream()) png.writeImageToStream (img, *os);
+        std::printf ("wrote %s\n", f.getFullPathName().toRawUTF8());
+    }
+
+    // ---- the talk box, mid-word, with a key held
+    ed.showTab (9);
+    pump (250);
+    {
+        auto img = ed.createComponentSnapshot (ed.getLocalBounds(), true, 1.0f);
+        juce::PNGImageFormat png;
+        auto f = dir.getChildFile ("talk_box.png");
         f.deleteFile();
         if (auto os = f.createOutputStream()) png.writeImageToStream (img, *os);
         std::printf ("wrote %s\n", f.getFullPathName().toRawUTF8());
@@ -1514,6 +1528,7 @@ static void testComposeUI()
 }
 
 #include "VocalTests.inc"
+#include "TalkTests.inc"
 
 int main (int argc, char** argv)
 {
@@ -1522,6 +1537,12 @@ int main (int argc, char** argv)
     if (argc > 1 && juce::String (argv[1]) == "--vocal")
     {
         testVocalAnalysis(); testVocalRender(); testVocalEditing(); testVocalSession(); testVocalProcessor(); testVocalUI();
+        std::printf ("\n%d checks, %d failed\n", checks, failures);
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc > 1 && juce::String (argv[1]) == "--talk")
+    {
+        testTalkBox(); testTalkProcessor(); testTalkUI();
         std::printf ("\n%d checks, %d failed\n", checks, failures);
         return failures == 0 ? 0 : 1;
     }
@@ -1549,6 +1570,9 @@ int main (int argc, char** argv)
     testVocalSession();
     testVocalProcessor();
     testVocalUI();
+    testTalkBox();
+    testTalkProcessor();
+    testTalkUI();
     std::printf ("\n%d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

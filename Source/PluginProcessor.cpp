@@ -16,6 +16,9 @@ struct AIOProcessor::Tx
     float singGateDb = -55.f, singMinHz = 100.f, singMaxHz = 800.f;
     double beat0 = 0.0, bps = 0.0, bpm = 120.0;
     const SingTrack* st = nullptr;
+    bool talkOn = false;
+    aio::TalkSettings ts;
+    int talkPart = 1;
 };
 
 AIOProcessor::BusesProperties AIOProcessor::makeBuses()
@@ -84,6 +87,8 @@ void AIOProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     learn.prepare (sampleRate);
     master.prepare (sampleRate);
     vocal.prepare (sampleRate);
+    talk.prepare (sampleRate);
+    talkKeyApplied = -1; talkSourceApplied = -1; tbEvN = 0;
 
     tunerWasOn = false;
     wasRunning = wasComposeRun = false;
@@ -421,6 +426,7 @@ int AIOProcessor::gatherEvents (const Pattern& p, double b0, double b1, int n, E
 void AIOProcessor::releaseAllNotes (juce::MidiBuffer& midi, int sample)
 {
     synth.allNotesOff();
+    if ((int) f ("tbSource") == 2) talk.allNotesOff();            // Compose-driven talk box notes end with the transport
 #if JucePlugin_ProducesMidiOutput
     for (int part = 0; part < 5; ++part)
         for (int n = 0; n < 128; ++n)
@@ -531,6 +537,22 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
         if (lastFeelKey.exchange (fk) != fk) { patternDirty = true; triggerAsyncUpdate(); }
     }
 
+    // ---------------------------------------------------------------- talk box: MIDI in (effect build; the host only sends it if its MIDI input is routed here)
+    tbEvN = 0;
+#if ! JucePlugin_IsSynth
+    for (const auto meta : midi)
+    {
+        const auto m = meta.getMessage();
+        TbEvt e { std::clamp (meta.samplePosition, 0, total - 1), -1, 0, 0 };
+        if (m.isNoteOn())              { e.kind = 1; e.a = m.getNoteNumber(); e.b = m.getVelocity(); }
+        else if (m.isNoteOff())        { e.kind = 0; e.a = m.getNoteNumber(); }
+        else if (m.isPitchWheel())     { e.kind = 2; e.a = m.getPitchWheelValue() - 8192; }
+        else if (m.isController() && m.getControllerNumber() == 1) { e.kind = 3; e.a = m.getControllerValue(); }
+        else if (m.isAllNotesOff() || m.isAllSoundOff()) e.kind = 4;
+        if (e.kind >= 0 && tbEvN < (int) tbEv.size()) tbEv[(size_t) tbEvN++] = e;
+    }
+#endif
+
     // ---------------------------------------------------------------- vocal editor: record the incoming audio / play the edited clip instead of it
     bool vocalReplaced = false;
 #if ! JucePlugin_IsSynth
@@ -602,11 +624,23 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
     else if (wasRunning)
         releaseAllNotes (midi, 0);
 
+    tx.talkOn = JucePlugin_IsSynth == 0 && f ("tbOn") > 0.5f && ! fileMode;
+    if (tx.talkOn)
+    {
+        tx.ts = readTalkSettings();
+        tx.ts.on = true;
+        tx.talkPart = tx.ts.source == 2 ? (int) f ("tbPart") : 0;
+        tx.talkPart = tx.talkPart == 0 ? 1 : (tx.talkPart == 1 ? 4 : 2);       // melody, synth / arp, bass
+        if (tx.ts.source != talkSourceApplied) { talk.allNotesOff(); talkKeyApplied = -1; talkSourceApplied = tx.ts.source; }
+    }
+    else { talk.allNotesOff(); talkKeyApplied = -1; talkSourceApplied = -1; }
+
     SynthParams sp;
     sp.wave[0] = (int) f ("synWaveChord"); sp.wave[1] = (int) f ("synWaveMel"); sp.wave[2] = (int) f ("synWaveBass"); sp.wave[4] = (int) f ("synWaveSyn");
     sp.level[0] = f ("synLevelChord") * 0.01f; sp.level[1] = f ("synLevelMel") * 0.01f; sp.level[2] = f ("synLevelBass") * 0.01f;
     sp.level[3] = f ("synLevelDrum") * 0.01f; sp.level[4] = f ("synLevelSyn") * 0.01f;
     if (tx.singRun) sp.level[1] = 0.f;                       // the guide tone replaces the synth melody while singing
+    if (tx.talkOn && tx.ts.source == 2 && f ("tbMuteSyn") > 0.5f) sp.level[tx.talkPart] = 0.f;   // the talk box plays that part instead
     sp.cutoffHz = f ("synCutoff"); sp.attackMs = f ("synAttack"); sp.releaseMs = f ("synRelease");
     synth.setParams (sp);
 
@@ -727,6 +761,10 @@ void AIOProcessor::processChunk (float* l, float* r, int n, int chunkOffset, con
                 {
                     const auto& e = evBuf[(size_t) i];
                     const int part = std::clamp (e.part, 0, 4);
+                    if (tx.talkOn && tx.ts.source == 2 && part == tx.talkPart)
+                    {
+                        if (e.on) talk.noteOn (e.note, e.vel); else talk.noteOff (e.note);
+                    }
                     if (e.on)
                     {
                         synth.noteOn (part, e.note, e.vel);
@@ -763,6 +801,36 @@ void AIOProcessor::processChunk (float* l, float* r, int n, int chunkOffset, con
         }
         for (auto& o : audOff)
             if (o.used && (o.left -= n) <= 0) { synth.noteOff (o.part, o.note); o.used = false; }
+
+        // ---- talk box: the voice shapes a synth lead (it replaces the voice here; the Compose synth is mixed in afterwards)
+        if (tx.talkOn)
+        {
+            const int key = talkKey.load();
+            if (key != talkKeyApplied)
+            {
+                if (talkKeyApplied >= 0) talk.noteOff (talkKeyApplied);
+                if (key >= 0) talk.noteOn (key, 100);
+                talkKeyApplied = key;
+            }
+            int cur = 0;
+            auto run = [&] (int a, int b) { if (b > a) talk.process (l + a, r + a, b - a, tx.ts); };
+            for (int k = 0; k < tbEvN; ++k)
+            {
+                const auto& e = tbEv[(size_t) k];
+                if (e.sample < chunkOffset || e.sample >= chunkOffset + n) continue;
+                const int at = e.sample - chunkOffset;
+                run (cur, at); cur = at;
+                switch (e.kind)
+                {
+                    case 0: if (tx.ts.source == 1) talk.noteOff (e.a); break;
+                    case 1: if (tx.ts.source == 1) talk.noteOn (e.a, e.b); break;
+                    case 2: talk.setBend ((float) e.a / 8192.f * 2.f); break;
+                    case 3: talk.setMod ((float) e.a / 127.f); break;
+                    default: if (tx.ts.source == 1) talk.allNotesOff(); break;
+                }
+            }
+            run (cur, n);
+        }
 
         {
             float* sl = synthBuf.getWritePointer (0);
@@ -1076,3 +1144,67 @@ void AIOProcessor::autoEditVocal (const std::vector<char>* scope)
 juce::AudioProcessorEditor* AIOProcessor::createEditor() { return new AIOEditor (*this); }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new AIOProcessor(); }
+
+// ------------------------------------------------------------------------------------------------
+// Talk box glue
+aio::TalkSettings AIOProcessor::readTalkSettings() const
+{
+    aio::TalkSettings t;
+    t.on = f ("tbOn") > 0.5f;
+    t.source = (int) f ("tbSource");
+    t.wave = (int) f ("tbWave");
+    t.octave = (int) f ("tbOctave");
+    t.glideMs = f ("tbGlide");
+    t.vibRate = f ("tbVibRate"); t.vibDepth = f ("tbVibDepth");
+    t.sub = f ("tbSub");
+    t.carrierTone = f ("tbCarTone");
+    t.sharp = f ("tbSharp");
+    t.shiftSt = f ("tbShift");
+    t.presence = f ("tbPresence");
+    t.consonants = f ("tbCons");
+    t.dynamics = f ("tbDyn");
+    t.gateDb = f ("tbGate");
+    t.drive = f ("tbDrive");
+    t.toneHz = f ("tbTone");
+    t.mix = f ("tbMix");
+    t.levelDb = f ("tbLevel");
+    t.snap = f ("tbSnap");
+    t.mask = getEffectiveTunerMask();
+    t.fixedNote = (int) f ("tbFixed");
+    return t;
+}
+
+namespace
+{
+struct TbSet { const char* id; float v; };
+struct TbPreset { const char* name; std::vector<TbSet> sets; };
+const std::vector<TbPreset>& talkPresets()
+{
+    static const std::vector<TbPreset> p = {
+        { "West Coast lead",   { { "tbSource", 1 }, { "tbWave", 0 }, { "tbOctave", 0 }, { "tbGlide", 70 }, { "tbVibRate", 5.5f }, { "tbVibDepth", 10 }, { "tbSub", 35 },
+                                 { "tbCarTone", 9000 }, { "tbSharp", 65 }, { "tbShift", 0 }, { "tbPresence", 65 }, { "tbCons", 55 }, { "tbDyn", 45 }, { "tbDrive", 30 }, { "tbTone", 7000 }, { "tbMix", 100 } } },
+        { "Funk whine",        { { "tbSource", 1 }, { "tbWave", 0 }, { "tbOctave", 0 }, { "tbGlide", 140 }, { "tbVibRate", 5.8f }, { "tbVibDepth", 24 }, { "tbSub", 20 },
+                                 { "tbCarTone", 11000 }, { "tbSharp", 55 }, { "tbShift", 0.5f }, { "tbPresence", 72 }, { "tbCons", 50 }, { "tbDyn", 40 }, { "tbDrive", 45 }, { "tbTone", 8500 }, { "tbMix", 100 } } },
+        { "Smooth slow jam",   { { "tbSource", 1 }, { "tbWave", 2 }, { "tbOctave", 0 }, { "tbGlide", 95 }, { "tbVibRate", 5.2f }, { "tbVibDepth", 16 }, { "tbSub", 15 },
+                                 { "tbCarTone", 7000 }, { "tbSharp", 55 }, { "tbShift", -0.5f }, { "tbPresence", 45 }, { "tbCons", 55 }, { "tbDyn", 55 }, { "tbDrive", 15 }, { "tbTone", 5500 }, { "tbMix", 100 } } },
+        { "Robot voice",       { { "tbSource", 3 }, { "tbWave", 3 }, { "tbOctave", -1 }, { "tbFixed", 60 }, { "tbGlide", 0 }, { "tbVibDepth", 0 }, { "tbSub", 0 },
+                                 { "tbCarTone", 12000 }, { "tbSharp", 85 }, { "tbShift", 0 }, { "tbPresence", 70 }, { "tbCons", 85 }, { "tbDyn", 85 }, { "tbDrive", 10 }, { "tbTone", 9000 }, { "tbMix", 100 } } },
+        { "Sub talk bass",     { { "tbSource", 1 }, { "tbWave", 0 }, { "tbOctave", -1 }, { "tbGlide", 30 }, { "tbVibDepth", 4 }, { "tbSub", 70 },
+                                 { "tbCarTone", 5000 }, { "tbSharp", 60 }, { "tbShift", 0 }, { "tbPresence", 25 }, { "tbCons", 40 }, { "tbDyn", 60 }, { "tbDrive", 40 }, { "tbTone", 3500 }, { "tbMix", 100 } } },
+        { "Choir ooh",         { { "tbSource", 1 }, { "tbWave", 2 }, { "tbOctave", 0 }, { "tbGlide", 120 }, { "tbVibRate", 5.0f }, { "tbVibDepth", 26 }, { "tbSub", 0 },
+                                 { "tbCarTone", 6000 }, { "tbSharp", 30 }, { "tbShift", -1.5f }, { "tbPresence", 30 }, { "tbCons", 30 }, { "tbDyn", 60 }, { "tbDrive", 0 }, { "tbTone", 6000 }, { "tbMix", 100 } } },
+        { "Sing it (follow voice)", { { "tbSource", 0 }, { "tbWave", 0 }, { "tbOctave", 0 }, { "tbSnap", 100 }, { "tbGlide", 45 }, { "tbVibDepth", 8 }, { "tbSub", 25 },
+                                 { "tbCarTone", 9000 }, { "tbSharp", 60 }, { "tbPresence", 60 }, { "tbCons", 60 }, { "tbDyn", 50 }, { "tbDrive", 25 }, { "tbTone", 7000 }, { "tbMix", 100 } } },
+    };
+    return p;
+}
+}
+
+int AIOProcessor::talkPresetCount() { return (int) talkPresets().size(); }
+const char* AIOProcessor::talkPresetName (int i) { return talkPresets()[(size_t) std::clamp (i, 0, talkPresetCount() - 1)].name; }
+void AIOProcessor::applyTalkPreset (int index)
+{
+    index = std::clamp (index, 0, talkPresetCount() - 1);
+    for (auto& s : talkPresets()[(size_t) index].sets) setParam (s.id, s.v);
+    setParam ("tbOn", 1.f);
+}

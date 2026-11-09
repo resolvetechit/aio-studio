@@ -20,6 +20,8 @@ struct TunerSettings
     float    minHz = 100.f, maxHz = 800.f;
     float    gateDb = -55.f;
     int      forcePc = -1;    // >= 0: pull the voice to this pitch class (any octave) instead of using the scale mask
+    float    transposeSt = 0.f;   // voice changer: fixed pitch shift in semitones (applied before the scale correction)
+    float    formantSt = 0.f;     // voice changer: moves the formants (the "size of the throat") independently of the pitch
 };
 
 /*
@@ -68,6 +70,8 @@ public:
     {
         const double retuneCoef = (s.retuneMs <= 0.5f) ? 1.0 : 1.0 - std::exp (-1.0 / (sr * (double) s.retuneMs * 0.001));
         const double voicedStep = 1.0 / (sr * 0.008);
+        const double fr = std::exp2 ((double) std::clamp (s.formantSt, -12.f, 12.f) / 12.0);
+        const bool plainGrains = std::abs (s.formantSt) < 0.01f;
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -95,11 +99,12 @@ public:
                 if (! havePrevA) a = aTgt;
                 else             a = prevA + Pin * std::round ((aTgt - prevA) / Pin);
 
-                // keep the grain's right edge inside what we have received so far
-                if (a + H > (double) n)
-                    a -= Pin * std::ceil ((a + H - (double) n) / Pin);
+                // keep the grain's right edge inside what we have received so far (the grain is read wider when the formants move up)
+                const int Hs = plainGrains ? H : (int) std::ceil ((double) H * std::max (1.0, fr)) + 2;
+                if (a + Hs > (double) n)
+                    a -= Pin * std::ceil ((a + Hs - (double) n) / Pin);
                 // and inside the ring
-                if (a - H < (double) (n - (long long) inMask + 64))
+                if (a - Hs < (double) (n - (long long) inMask + 64))
                     a = (double) (n - latency);
 
                 const long long ai = (long long) std::llround (a);
@@ -108,9 +113,22 @@ public:
                     const long long oi = Ti + k;
                     if (oi < n) continue;                       // already emitted
                     const float w = (float) (0.5 + 0.5 * std::cos (kPi * (double) k / Pin));
-                    const size_t ao = (size_t) oi & accMask, ii = (size_t) (ai + k) & inMask;
-                    acc[0][ao] += w * inBuf[0][ii];
-                    acc[1][ao] += w * inBuf[1][ii];
+                    const size_t ao = (size_t) oi & accMask;
+                    if (plainGrains)
+                    {
+                        const size_t ii = (size_t) (ai + k) & inMask;
+                        acc[0][ao] += w * inBuf[0][ii];
+                        acc[1][ao] += w * inBuf[1][ii];
+                    }
+                    else
+                    {
+                        const double sp = (double) ai + (double) k * fr;
+                        const long long i0 = (long long) std::floor (sp);
+                        const float fx = (float) (sp - (double) i0);
+                        const size_t j0 = (size_t) i0 & inMask, j1 = (size_t) (i0 + 1) & inMask;
+                        acc[0][ao] += w * (inBuf[0][j0] + (inBuf[0][j1] - inBuf[0][j0]) * fx);
+                        acc[1][ao] += w * (inBuf[1][j0] + (inBuf[1][j1] - inBuf[1][j0]) * fx);
+                    }
                     wsum[ao]   += w;
                 }
                 prevA = a; havePrevA = true;
@@ -192,7 +210,9 @@ private:
         detMidi.store ((float) midi);
 
         const bool forced = s.forcePc >= 0 && s.forcePc < 12;
-        if (s.mask == 0 && ! forced) { shiftTarget = 0.0; tgtMidi.store (-1.f); return; }
+        const double tr = (double) std::clamp (s.transposeSt, -12.f, 12.f);
+        if (s.mask == 0 && ! forced) { shiftTarget = tr; tgtMidi.store ((float) (midi + tr)); return; }
+        midi += tr;                                    // the scale correction works on the pitch after the transposition
 
         int cand;
         if (forced)
@@ -213,7 +233,7 @@ private:
         targetNote = cand; haveTarget = true;
 
         const double targetMidiVal = (double) cand + s.fineCents / 100.0;
-        shiftTarget = std::clamp ((targetMidiVal - midi) * (double) s.amount, -12.0, 12.0);
+        shiftTarget = std::clamp (tr + (targetMidiVal - midi) * (double) s.amount, -14.0, 14.0);
         tgtMidi.store ((float) targetMidiVal);
     }
 

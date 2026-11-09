@@ -78,7 +78,7 @@ void applyPreset (juce::AudioProcessorValueTreeState& apvts, int index)
         if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (p))
         {
             const auto id = r->getParameterID();
-            if (id.startsWith ("cmp") || id.startsWith ("syn") || id.startsWith ("ved") || id.startsWith ("tb") || id.startsWith ("tuneKey") || id.startsWith ("tuneScale")
+            if (id.startsWith ("cmp") || id.startsWith ("syn") || id.startsWith ("ved") || id.startsWith ("tb") || id.startsWith ("ly") || id.startsWith ("vc") || id.startsWith ("tuneKey") || id.startsWith ("tuneScale")
                 || id.startsWith ("mast") || id.startsWith ("sing") || id.startsWith ("tuneNote") || id.startsWith ("tuneVoice") || id.startsWith ("tuneLink"))
                 continue;
             r->setValueNotifyingHost (r->getDefaultValue());

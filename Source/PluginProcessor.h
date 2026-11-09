@@ -12,6 +12,8 @@
 #include "dsp/Guide.h"
 #include "dsp/PitchDetector.h"
 #include "dsp/TalkBox.h"
+#include "dsp/LayerEngine.h"
+#include "dsp/LayerPresets.h"
 #include "compose/Composer.h"
 #include "compose/Styles.h"
 #include "master/MasterEngine.h"
@@ -133,6 +135,24 @@ public:
     static const char* talkPresetName (int index);
     void applyTalkPreset (int index);                                // message thread
 
+    // ---- Layers (both builds)
+    aio::LayerEngine&   getLayers() { return layers; }
+    aio::LayersSettings readLayerSettings() const;
+    void setLayerKey (int note) { layerKey.store (note); }           // on-screen key (-1 = released)
+    static int  layerPresetCount();
+    static const char* layerPresetName (int index);
+    void applyLayerPreset (int index);                               // message thread
+    void randomizeLayers();                                          // message thread: new sounds for every layer that is not locked
+    bool loadLayerSample (int layer, const juce::File& file, juce::String& error);   // message thread
+    void clearLayerSample (int layer);
+    juce::String layerSampleName (int layer) const;
+    bool hasLayerSampleFor (int layer) const;
+
+    // ---- Voice changer (effect build)
+    static int  voicePresetCount();
+    static const char* voicePresetName (int index);
+    void applyVoicePreset (int index);                               // message thread
+
 private:
     static BusesProperties makeBuses();
     struct Tx;
@@ -147,14 +167,30 @@ private:
     float f (const char* id) const { return apvts.getRawParameterValue (id)->load(); }
     float f (const juce::String& id) const { return apvts.getRawParameterValue (id)->load(); }
     void  releaseAllNotes (juce::MidiBuffer& midi, int sample);
+    void  voiceChangerTone (float* l, float* r, int n, const Tx& tx, double energyIn);
+    std::atomic<float>* lyp (int layer, int k) const;
+    mutable std::array<std::array<std::atomic<float>*, 16>, aio::kLayers> lyPtr {};
 
     // talk box
     aio::TalkBox talk;
     std::atomic<int> talkKey { -1 };
     int talkKeyApplied = -1, talkSourceApplied = -1;
-    struct TbEvt { int sample; int kind; int a; int b; };          // kind: 0 off, 1 on, 2 bend (a = -8192..8191), 3 mod (a = 0..127), 4 all off
+    struct TbEvt { int sample; int kind; int a; int b; };          // kind: 0 off, 1 on, 2 bend (a = -8192..8191), 3 mod (a = 0..127), 4 all off, 5 sustain pedal (a = 0..127)
     std::array<TbEvt, 256> tbEv {};
     int tbEvN = 0;
+
+    // layers
+    aio::LayerEngine layers;
+    std::atomic<int> layerKey { -1 };
+    int layerKeyApplied = -1, layerSourceApplied = -1;
+    std::array<std::shared_ptr<const aio::SampleData>, aio::kLayers> layerSamples;      // owned by the message thread, copied to the engine in processBlock
+    std::array<std::atomic<int>, aio::kLayers> layerSampleVer {};
+    std::array<int, aio::kLayers> layerSampleApplied {};
+    mutable juce::SpinLock layerSampleLock;
+    aio::Biquad vcLow[2], vcHigh[2];
+    float vcWarmthApplied = 1e9f, vcAirApplied = 1e9f;
+    float vcGainSm = 1.f;
+    double vcPin = 0.0, vcPout = 0.0;
 
     // cached raw parameter pointers (no string work on the audio thread)
     std::array<std::array<std::atomic<float>*, 5>, 6> eqPtr {};

@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 #include "ui/ComposeUI.h"
+#include "ui/LayersUI.h"
 #include "Presets.h"
 #include <deque>
 
@@ -534,6 +535,7 @@ private:
 };
 
 #include "ui/NewPanels.inc"
+#include "ui/LayersUI.inc"
 
 // =================================================================================================
 // Editor
@@ -548,21 +550,29 @@ AIOEditor::AIOEditor (AIOProcessor& p) : AudioProcessorEditor (&p), proc (p)
     space   = std::make_unique<SpacePanel> (p);
     compose = std::make_unique<ComposePanel> (p);
     panels = { tune.get(), eqPanel.get(), dyn.get(), space.get(), compose.get() };
+    juce::StringArray tabNames { "TUNE", "EQ", "DYN + SAT", "SPACE", "COMPOSE" };
+    juce::Array<juce::Colour> tabColours { col::accent, col::accent, col::accent, col::accent2, col::violet };
+    auto addTab = [&] (juce::Component* c, const char* name, juce::Colour colour) { panels.add (c); tabNames.add (name); tabColours.add (colour); };
+    layersPanel = std::make_unique<LayersPanel> (p);
 #if ! JucePlugin_IsSynth
     master     = std::make_unique<MasterPanel> (p);
     voicePanel = std::make_unique<VoicePanel> (p);
     singPanel  = std::make_unique<SingPanel> (p);
     vocalPanel = std::make_unique<VocalPanel> (p);
     talkPanel  = std::make_unique<TalkPanel> (p);
-    panels.add (master.get()); panels.add (voicePanel.get()); panels.add (singPanel.get()); panels.add (vocalPanel.get()); panels.add (talkPanel.get());
+    morphPanel = std::make_unique<MorphPanel> (p);
+    addTab (master.get(), "MASTER", col::accent2); addTab (voicePanel.get(), "VOICE", col::chords); addTab (singPanel.get(), "SING", col::melody);
+    addTab (vocalPanel.get(), "VOCAL EDIT", col::bass); addTab (talkPanel.get(), "TALK BOX", juce::Colour (0xfff2a03d));
+    layersTab = panels.size(); addTab (layersPanel.get(), "LAYERS", aio::ui::layersCol);
+    morphTab = panels.size();  addTab (morphPanel.get(), "MORPH", aio::ui::morphCol);
+#else
+    layersTab = panels.size(); addTab (layersPanel.get(), "LAYERS", aio::ui::layersCol);
 #endif
     for (auto* c : panels) addChildComponent (c);
 
-    static const char* names[10] = { "TUNE", "EQ", "DYN + SAT", "SPACE", "COMPOSE", "MASTER", "VOICE", "SING", "VOCAL EDIT", "TALK BOX" };
-    static const juce::Colour tabColours[10] = { col::accent, col::accent, col::accent, col::accent2, col::violet, col::accent2, col::chords, col::melody, col::bass, juce::Colour (0xfff2a03d) };
     for (int i = 0; i < panels.size(); ++i)
     {
-        auto* b = tabButtons.add (new juce::TextButton (names[i]));
+        auto* b = tabButtons.add (new juce::TextButton (tabNames[i]));
         b->setClickingTogglesState (true);
         b->setRadioGroupId (4242);
         b->setColour (juce::TextButton::buttonOnColourId, tabColours[i]);
@@ -609,6 +619,17 @@ aio::ui::TalkKeys* AIOEditor::talkKeys()
 #endif
 }
 
+aio::ui::LayerKeys* AIOEditor::layerKeys() { return layersPanel ? &layersPanel->getKeys() : nullptr; }
+
+aio::ui::CharacterPad* AIOEditor::characterPad()
+{
+#if ! JucePlugin_IsSynth
+    return morphPanel ? &morphPanel->getPad() : nullptr;
+#else
+    return nullptr;
+#endif
+}
+
 aio::ui::VocalRoll* AIOEditor::vocalRoll()
 {
 #if ! JucePlugin_IsSynth
@@ -644,9 +665,9 @@ void AIOEditor::paint (juce::Graphics& g)
     g.setColour (col::dim);
     g.setFont (juce::Font (juce::FontOptions (11.5f)));
     #if JucePlugin_IsSynth
-    g.drawText ("tune  /  eq  /  dynamics  /  space  /  compose", 20, 58, 300, 16, juce::Justification::centredLeft);
+    g.drawText ("tune  /  eq  /  dynamics  /  space  /  compose  /  layers", 20, 58, 340, 16, juce::Justification::centredLeft);
 #else
-    g.drawText ("tune / eq / dynamics / space / compose / master / voice / sing / vocal edit / talk box", 20, 58, 420, 16, juce::Justification::centredLeft);
+    g.drawText ("tune / eq / dynamics / space / compose / master / voice / sing / vocal edit / talk box / layers / voice morph", 20, 58, 520, 16, juce::Justification::centredLeft);
 #endif
 }
 
@@ -666,7 +687,7 @@ void AIOEditor::resized()
     presetBox.setBounds (top.removeFromLeft (560).withTrimmedLeft (330).withHeight (28).translated (0, 22));
 
     auto tabs = b.removeFromTop (34).reduced (16, 0);
-    const int tw = std::min (panels.size() > 5 ? 143 : 150, tabs.getWidth() / std::max (1, panels.size()));
+    const int tw = std::min (panels.size() > 6 ? 143 : 150, tabs.getWidth() / std::max (1, panels.size()));
     for (auto* t : tabButtons) { t->setBounds (tabs.removeFromLeft (tw).withTrimmedRight (6)); }
 
     b.removeFromTop (8);

@@ -19,6 +19,11 @@ struct AIOProcessor::Tx
     bool talkOn = false;
     aio::TalkSettings ts;
     int talkPart = 1;
+    bool layersOn = false;
+    int  lySource = 0, lyPart = -1;
+    aio::LayersSettings ly;
+    bool vcOn = false;
+    float vcPitch = 0.f, vcFormant = 0.f, vcGrit = 0.f;
 };
 
 AIOProcessor::BusesProperties AIOProcessor::makeBuses()
@@ -89,6 +94,12 @@ void AIOProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     vocal.prepare (sampleRate);
     talk.prepare (sampleRate);
     talkKeyApplied = -1; talkSourceApplied = -1; tbEvN = 0;
+    layers.prepare (sampleRate);
+    layerKeyApplied = -1; layerSourceApplied = -1;
+    for (auto& b : vcLow) b.reset();
+    for (auto& b : vcHigh) b.reset();
+    vcGainSm = 1.f; vcPin = vcPout = 0.0;
+    vcWarmthApplied = vcAirApplied = 1e9f;
 
     tunerWasOn = false;
     wasRunning = wasComposeRun = false;
@@ -355,7 +366,7 @@ void AIOProcessor::audition (int part, int note, int vel, int lenMs)
 
 void AIOProcessor::parameterChanged (const juce::String& id, float)
 {
-    juce::ignoreUnused (id);
+    if (id.startsWith ("ly") || id.startsWith ("vc") || id.startsWith ("tb") || id.startsWith ("ved")) return;     // sound-engine controls never change the generated pattern
     patternDirty = true;
     triggerAsyncUpdate();
 }
@@ -427,6 +438,7 @@ void AIOProcessor::releaseAllNotes (juce::MidiBuffer& midi, int sample)
 {
     synth.allNotesOff();
     if ((int) f ("tbSource") == 2) talk.allNotesOff();            // Compose-driven talk box notes end with the transport
+    if ((int) f ("lySource") != 0) layers.allNotesOff();           // same for the layers
 #if JucePlugin_ProducesMidiOutput
     for (int part = 0; part < 5; ++part)
         for (int n = 0; n < 128; ++n)
@@ -515,6 +527,21 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
     const int total = buffer.getNumSamples();
     if (buffer.getNumChannels() < 2 || total == 0) return;
 
+    // ---------------------------------------------------------------- MIDI in (talk box, layers): taken before the instrument build clears the buffer for its own MIDI out
+    tbEvN = 0;
+    for (const auto meta : midi)
+    {
+        const auto m = meta.getMessage();
+        TbEvt e { std::clamp (meta.samplePosition, 0, total - 1), -1, 0, 0 };
+        if (m.isNoteOn())              { e.kind = 1; e.a = m.getNoteNumber(); e.b = m.getVelocity(); }
+        else if (m.isNoteOff())        { e.kind = 0; e.a = m.getNoteNumber(); }
+        else if (m.isPitchWheel())     { e.kind = 2; e.a = m.getPitchWheelValue() - 8192; }
+        else if (m.isController() && m.getControllerNumber() == 1)  { e.kind = 3; e.a = m.getControllerValue(); }
+        else if (m.isController() && m.getControllerNumber() == 64) { e.kind = 5; e.a = m.getControllerValue(); }
+        else if (m.isAllNotesOff() || m.isAllSoundOff()) e.kind = 4;
+        if (e.kind >= 0 && tbEvN < (int) tbEv.size()) tbEv[(size_t) tbEvN++] = e;
+    }
+
 #if JucePlugin_IsSynth
     buffer.clear();
     midi.clear();
@@ -537,22 +564,6 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
         if (lastFeelKey.exchange (fk) != fk) { patternDirty = true; triggerAsyncUpdate(); }
     }
 
-    // ---------------------------------------------------------------- talk box: MIDI in (effect build; the host only sends it if its MIDI input is routed here)
-    tbEvN = 0;
-#if ! JucePlugin_IsSynth
-    for (const auto meta : midi)
-    {
-        const auto m = meta.getMessage();
-        TbEvt e { std::clamp (meta.samplePosition, 0, total - 1), -1, 0, 0 };
-        if (m.isNoteOn())              { e.kind = 1; e.a = m.getNoteNumber(); e.b = m.getVelocity(); }
-        else if (m.isNoteOff())        { e.kind = 0; e.a = m.getNoteNumber(); }
-        else if (m.isPitchWheel())     { e.kind = 2; e.a = m.getPitchWheelValue() - 8192; }
-        else if (m.isController() && m.getControllerNumber() == 1) { e.kind = 3; e.a = m.getControllerValue(); }
-        else if (m.isAllNotesOff() || m.isAllSoundOff()) e.kind = 4;
-        if (e.kind >= 0 && tbEvN < (int) tbEv.size()) tbEv[(size_t) tbEvN++] = e;
-    }
-#endif
-
     // ---------------------------------------------------------------- vocal editor: record the incoming audio / play the edited clip instead of it
     bool vocalReplaced = false;
 #if ! JucePlugin_IsSynth
@@ -574,13 +585,16 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
     const bool composeOnParam = f ("cmpOn") > 0.5f;
     const bool singWanted = f ("singOn") > 0.5f && JucePlugin_IsSynth == 0;
     const bool assistWanted = singWanted && f ("singAssist") > 0.5f;
-    const bool tunerLatencyOn = cpFull.tuneOn || assistWanted;
+    const bool vcWanted = JucePlugin_IsSynth == 0 && f ("vcOn") > 0.5f;
+    const bool tunerLatencyOn = cpFull.tuneOn || assistWanted || vcWanted;
 
     Tx tx;
     tx.fileMode = fileMode;
     tx.fileOriginal = fileMode && master.abOriginal.load();
     tx.tunerActive = tunerLatencyOn && ! fileMode && ! vocalReplaced;
     tx.assist = assistWanted;
+    tx.vcOn = vcWanted && ! fileMode;
+    tx.vcPitch = f ("vcPitch"); tx.vcFormant = f ("vcFormant"); tx.vcGrit = f ("vcGrit");
     tx.guideOn = singWanted && f ("singGuide") > 0.5f;
     tx.guideLevel = f ("singGuideLvl") * 0.01f;
     tx.bpm = bpm;
@@ -635,12 +649,35 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
     }
     else { talk.allNotesOff(); talkKeyApplied = -1; talkSourceApplied = -1; }
 
+    tx.layersOn = f ("lyOn") > 0.5f && ! fileMode;
+    if (tx.layersOn)
+    {
+        tx.ly = readLayerSettings();
+        tx.ly.on = true;
+        tx.lySource = (int) f ("lySource");
+        static const int partOf[5] = { -1, 0, 1, 4, 2 };           // MIDI / keys, chords, melody, synth / arp, bass
+        tx.lyPart = partOf[std::clamp (tx.lySource, 0, 4)];
+        for (int i = 0; i < aio::kLayers; ++i)
+            if (layerSampleVer[(size_t) i].load() != layerSampleApplied[(size_t) i])
+            {
+                const juce::SpinLock::ScopedTryLockType lk (layerSampleLock);
+                if (lk.isLocked())
+                {
+                    layers.setSample (i, layerSamples[(size_t) i]);
+                    layerSampleApplied[(size_t) i] = layerSampleVer[(size_t) i].load();
+                }
+            }
+        if (tx.lySource != layerSourceApplied) { layers.allNotesOff(); layerKeyApplied = -1; layerSourceApplied = tx.lySource; }
+    }
+    else if (layerSourceApplied != -1) { layers.reset(); layerKeyApplied = -1; layerSourceApplied = -1; }
+
     SynthParams sp;
     sp.wave[0] = (int) f ("synWaveChord"); sp.wave[1] = (int) f ("synWaveMel"); sp.wave[2] = (int) f ("synWaveBass"); sp.wave[4] = (int) f ("synWaveSyn");
     sp.level[0] = f ("synLevelChord") * 0.01f; sp.level[1] = f ("synLevelMel") * 0.01f; sp.level[2] = f ("synLevelBass") * 0.01f;
     sp.level[3] = f ("synLevelDrum") * 0.01f; sp.level[4] = f ("synLevelSyn") * 0.01f;
     if (tx.singRun) sp.level[1] = 0.f;                       // the guide tone replaces the synth melody while singing
     if (tx.talkOn && tx.ts.source == 2 && f ("tbMuteSyn") > 0.5f) sp.level[tx.talkPart] = 0.f;   // the talk box plays that part instead
+    if (tx.layersOn && tx.lyPart >= 0 && f ("lyMuteSyn") > 0.5f) sp.level[tx.lyPart] = 0.f;      // the layers play that part instead
     sp.cutoffHz = f ("synCutoff"); sp.attackMs = f ("synAttack"); sp.releaseMs = f ("synRelease");
     synth.setParams (sp);
 
@@ -735,12 +772,15 @@ void AIOProcessor::processChunk (float* l, float* r, int n, int chunkOffset, con
         // ---- pitch correction (acts on the incoming audio only); short sub-blocks so "assist" can follow the melody
         if (tx.tunerActive)
         {
+            double eIn = 0.0;
+            if (tx.vcOn) for (int i = 0; i < n; ++i) eIn += (double) l[i] * l[i] + (double) r[i] * r[i];
             constexpr int kSub = 128;
             for (int off = 0; off < n; off += kSub)
             {
                 const int m = std::min (kSub, n - off);
                 TunerSettings ts = cp.tune;
                 ts.on = true;
+                if (tx.vcOn) { ts.transposeSt = tx.vcPitch; ts.formantSt = tx.vcFormant; }
                 if (tx.assist && tx.singRun && tx.st != nullptr)
                 {
                     const int idx = tx.st->noteAt (tx.beat0 + (double) off * tx.bps);
@@ -750,6 +790,7 @@ void AIOProcessor::processChunk (float* l, float* r, int n, int chunkOffset, con
                 else if (! cp.tuneOn) ts.mask = 0;
                 chain.tuner.process (l + off, r + off, m, ts);
             }
+            if (tx.vcOn) voiceChangerTone (l, r, n, tx, eIn);
         }
 
         // ---- composer -> internal synth (+ MIDI out for the instrument build)
@@ -764,6 +805,10 @@ void AIOProcessor::processChunk (float* l, float* r, int n, int chunkOffset, con
                     if (tx.talkOn && tx.ts.source == 2 && part == tx.talkPart)
                     {
                         if (e.on) talk.noteOn (e.note, e.vel); else talk.noteOff (e.note);
+                    }
+                    if (tx.layersOn && tx.lyPart >= 0 && part == tx.lyPart)
+                    {
+                        if (e.on) layers.noteOn (e.note, e.vel); else layers.noteOff (e.note);
                     }
                     if (e.on)
                     {
@@ -826,7 +871,39 @@ void AIOProcessor::processChunk (float* l, float* r, int n, int chunkOffset, con
                     case 1: if (tx.ts.source == 1) talk.noteOn (e.a, e.b); break;
                     case 2: talk.setBend ((float) e.a / 8192.f * 2.f); break;
                     case 3: talk.setMod ((float) e.a / 127.f); break;
+                    case 5: break;
                     default: if (tx.ts.source == 1) talk.allNotesOff(); break;
+                }
+            }
+            run (cur, n);
+        }
+
+        // ---- layers: nine sound layers on every key (MIDI, on-screen keys or Compose notes), mixed on top of whatever is in l / r
+        if (tx.layersOn)
+        {
+            const int key = layerKey.load();
+            if (key != layerKeyApplied)
+            {
+                if (layerKeyApplied >= 0) layers.noteOff (layerKeyApplied);
+                if (key >= 0) layers.noteOn (key, 100);
+                layerKeyApplied = key;
+            }
+            int cur = 0;
+            auto run = [&] (int a, int b) { if (b > a) layers.render (l + a, r + a, b - a, tx.ly); };
+            for (int k = 0; k < tbEvN; ++k)
+            {
+                const auto& e = tbEv[(size_t) k];
+                if (e.sample < chunkOffset || e.sample >= chunkOffset + n) continue;
+                const int at = e.sample - chunkOffset;
+                run (cur, at); cur = at;
+                switch (e.kind)
+                {
+                    case 0: if (tx.lySource == 0) layers.noteOff (e.a); break;
+                    case 1: if (tx.lySource == 0) layers.noteOn (e.a, e.b); break;
+                    case 2: layers.setBend ((float) e.a / 8192.f * 2.f); break;
+                    case 3: layers.setMod ((float) e.a / 127.f); break;
+                    case 5: layers.setSustain (e.a >= 64); break;
+                    default: if (tx.lySource == 0) layers.allNotesOff(); break;
                 }
             }
             run (cur, n);
@@ -1056,6 +1133,27 @@ void AIOProcessor::getStateInformation (juce::MemoryBlock& dest)
         if (blk.getSize() > 0) state.setProperty ("vedClip", blk.toBase64Encoding(), nullptr);
     }
 #endif
+    for (int i = 0; i < aio::kLayers; ++i)
+    {
+        std::shared_ptr<const aio::SampleData> sd;
+        { const juce::SpinLock::ScopedLockType lk (layerSampleLock); sd = layerSamples[(size_t) i]; }
+        if (sd && sd->size() > 8)
+        {
+            juce::MemoryBlock mb;
+            auto* mos = new juce::MemoryOutputStream (mb, false);
+            juce::FlacAudioFormat ff;
+            const int ch = sd->r.empty() ? 1 : 2;
+            std::unique_ptr<juce::AudioFormatWriter> w (ff.createWriterFor (mos, sd->sr, (unsigned int) ch, 16, {}, 5));
+            if (w == nullptr) { delete mos; continue; }
+            juce::AudioBuffer<float> b (ch, (int) sd->size());
+            std::copy (sd->l.begin(), sd->l.end(), b.getWritePointer (0));
+            if (ch == 2) std::copy (sd->r.begin(), sd->r.end(), b.getWritePointer (1));
+            w->writeFromAudioSampleBuffer (b, 0, b.getNumSamples());
+            w.reset();
+            state.setProperty ("lySmp" + juce::String (i), mb.toBase64Encoding(), nullptr);
+            state.setProperty ("lySmpName" + juce::String (i), juce::String (sd->name), nullptr);
+        }
+    }
     if (auto xml = state.createXml()) copyXmlToBinary (*xml, dest);
 }
 
@@ -1094,6 +1192,33 @@ void AIOProcessor::setStateInformation (const void* data, int size)
                 else if (vocal.hasClip()) vocal.clear();
             }
 #endif
+            {
+                juce::AudioFormatManager fm; fm.registerBasicFormats();
+                for (int i = 0; i < aio::kLayers; ++i)
+                {
+                    std::shared_ptr<const aio::SampleData> sd;
+                    const auto key = "lySmp" + juce::String (i);
+                    juce::MemoryBlock mb;
+                    if (vt.hasProperty (key) && mb.fromBase64Encoding (vt.getProperty (key).toString()))
+                        if (std::unique_ptr<juce::AudioFormatReader> rd (fm.createReaderFor (std::make_unique<juce::MemoryInputStream> (mb.getData(), mb.getSize(), true))); rd != nullptr && rd->lengthInSamples > 8)
+                        {
+                            const int ch = (int) std::min (2u, std::max (1u, rd->numChannels));
+                            juce::AudioBuffer<float> buf (ch, (int) rd->lengthInSamples);
+                            rd->read (&buf, 0, (int) rd->lengthInSamples, 0, true, ch > 1);
+                            auto d = std::make_shared<aio::SampleData>();
+                            d->sr = rd->sampleRate;
+                            d->l.assign (buf.getReadPointer (0), buf.getReadPointer (0) + buf.getNumSamples());
+                            if (ch > 1) d->r.assign (buf.getReadPointer (1), buf.getReadPointer (1) + buf.getNumSamples());
+                            d->name = vt.getProperty ("lySmpName" + juce::String (i), "sample").toString().toStdString();
+                            sd = d;
+                        }
+                    {
+                        const juce::SpinLock::ScopedLockType lk (layerSampleLock);
+                        layerSamples[(size_t) i] = sd;
+                        layerSampleVer[(size_t) i].fetch_add (1);
+                    }
+                }
+            }
             apvts.replaceState (vt);
             patternDirty = true;
             triggerAsyncUpdate();
@@ -1207,4 +1332,220 @@ void AIOProcessor::applyTalkPreset (int index)
     index = std::clamp (index, 0, talkPresetCount() - 1);
     for (auto& s : talkPresets()[(size_t) index].sets) setParam (s.id, s.v);
     setParam ("tbOn", 1.f);
+}
+
+
+// ================================================================================================
+// Layers
+// ================================================================================================
+std::atomic<float>* AIOProcessor::lyp (int layer, int k) const
+{
+    static const char* suf[16] = { "On", "Src", "Level", "Pan", "Coarse", "Fine", "Track", "Attack", "Release", "Cutoff", "Reso", "Motion", "Drive", "LoFi", "Loop", "Lock" };
+    auto& p = lyPtr[(size_t) layer][(size_t) k];
+    if (p == nullptr) p = apvts.getRawParameterValue (juce::String ("ly") + juce::String (layer) + suf[k]);
+    return p;
+}
+
+aio::LayersSettings AIOProcessor::readLayerSettings() const
+{
+    aio::LayersSettings s;
+    s.on = f ("lyOn") > 0.5f;
+    s.levelDb = f ("lyLevel"); s.bright = f ("lyBright"); s.motion = f ("lyMotion");
+    s.relScale = f ("lyRelease"); s.velocity = f ("lyVel");
+    for (int i = 0; i < aio::kLayers; ++i)
+    {
+        auto& c = s.layer[(size_t) i];
+        c.on = lyp (i, 0)->load() > 0.5f;
+        c.src = std::clamp ((int) lyp (i, 1)->load(), 0, 6);
+        c.levelDb = lyp (i, 2)->load(); c.pan = lyp (i, 3)->load();
+        c.coarse = lyp (i, 4)->load(); c.fine = lyp (i, 5)->load();
+        c.track = lyp (i, 6)->load() > 0.5f;
+        c.attackMs = lyp (i, 7)->load(); c.releaseMs = lyp (i, 8)->load();
+        c.cutoffHz = lyp (i, 9)->load(); c.reso = lyp (i, 10)->load();
+        c.motion = lyp (i, 11)->load(); c.drive = lyp (i, 12)->load(); c.lofi = lyp (i, 13)->load();
+        c.loop = lyp (i, 14)->load() > 0.5f;
+    }
+    return s;
+}
+
+int AIOProcessor::layerPresetCount() { return (int) aio::layerPresets().size(); }
+const char* AIOProcessor::layerPresetName (int i) { return aio::layerPresets()[(size_t) std::clamp (i, 0, layerPresetCount() - 1)].name.c_str(); }
+
+static void setLayerParams (AIOProcessor& p, int i, const aio::LayerCfg& c)
+{
+    const auto id = [i] (const char* s) { return juce::String ("ly") + juce::String (i) + s; };
+    p.setParam (id ("On"), c.on ? 1.f : 0.f);       p.setParam (id ("Src"), (float) c.src);
+    p.setParam (id ("Level"), c.levelDb);           p.setParam (id ("Pan"), c.pan);
+    p.setParam (id ("Coarse"), c.coarse);           p.setParam (id ("Fine"), c.fine);
+    p.setParam (id ("Track"), c.track ? 1.f : 0.f);
+    p.setParam (id ("Attack"), c.attackMs);         p.setParam (id ("Release"), c.releaseMs);
+    p.setParam (id ("Cutoff"), c.cutoffHz);         p.setParam (id ("Reso"), c.reso);
+    p.setParam (id ("Motion"), c.motion);           p.setParam (id ("Drive"), c.drive);
+    p.setParam (id ("LoFi"), c.lofi);               p.setParam (id ("Loop"), c.loop ? 1.f : 0.f);
+}
+
+void AIOProcessor::applyLayerPreset (int index)
+{
+    const auto& pr = aio::layerPresets()[(size_t) std::clamp (index, 0, layerPresetCount() - 1)];
+    for (int i = 0; i < aio::kLayers; ++i)
+    {
+        if (f (juce::String ("ly") + juce::String (i) + "Lock") > 0.5f) continue;          // locked layers keep their sound
+        setLayerParams (*this, i, pr.layer[i]);
+    }
+    setParam ("lyBright", pr.bright); setParam ("lyMotion", pr.motion); setParam ("lyRelease", pr.relScale);
+    setParam ("lyOn", 1.f);
+}
+
+void AIOProcessor::randomizeLayers()
+{
+    juce::Random rnd (juce::Time::getMillisecondCounter() * 2654435761u + 17u);
+    auto rf = [&] (float a, float b) { return a + (b - a) * rnd.nextFloat(); };
+    auto logf = [&] (float a, float b) { return a * std::pow (b / a, rnd.nextFloat()); };
+    const int want = 3 + rnd.nextInt (4);                                      // 3 .. 6 layers sound
+    int made = 0;
+    for (int i = 0; i < aio::kLayers; ++i)
+    {
+        if (f (juce::String ("ly") + juce::String (i) + "Lock") > 0.5f) { if (f (juce::String ("ly") + juce::String (i) + "On") > 0.5f) ++made; continue; }
+        aio::LayerCfg c;
+        c.on = made < want;
+        if (c.on) ++made;
+        static const int srcs[] = { 0, 0, 1, 2, 2, 3, 4, 4, 5, 5 };
+        c.src = srcs[rnd.nextInt (10)];
+        if (hasLayerSampleFor (i) && rnd.nextInt (5) == 0) c.src = 6;
+        const bool pitched = c.src != 3;
+        c.track = pitched;
+        static const float tr[] = { -12.f, 0.f, 0.f, 0.f, 7.f, 12.f, 12.f, 19.f };
+        c.coarse = c.src == 3 ? (float) (rnd.nextInt (15) - 10) : tr[rnd.nextInt (8)];
+        c.levelDb = i == 0 ? rf (-9.f, -6.f) : rf (-20.f, -9.f);
+        c.pan = (float) (rnd.nextInt (121) - 60);
+        c.attackMs = (c.src == 3 || c.src == 4) ? rf (1.f, 12.f) : logf (80.f, 3500.f);
+        c.releaseMs = logf (600.f, 5500.f);
+        c.cutoffHz = logf (1800.f, 14000.f);
+        c.reso = rf (5.f, 40.f); c.motion = rf (15.f, 85.f);
+        c.drive = rnd.nextInt (4) == 0 ? rf (10.f, 35.f) : 0.f;
+        c.lofi = rnd.nextInt (4) == 0 ? rf (20.f, 55.f) : 0.f;
+        setLayerParams (*this, i, c);
+    }
+    setParam ("lyOn", 1.f);
+}
+
+bool AIOProcessor::hasLayerSampleFor (int layer) const
+{
+    const juce::SpinLock::ScopedLockType lk (layerSampleLock);
+    return layerSamples[(size_t) layer] != nullptr;
+}
+
+bool AIOProcessor::loadLayerSample (int layer, const juce::File& file, juce::String& error)
+{
+    layer = std::clamp (layer, 0, aio::kLayers - 1);
+    juce::AudioFormatManager fm; fm.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> rd (fm.createReaderFor (file));
+    if (rd == nullptr) { error = "Couldn't read that file (unsupported or damaged)."; return false; }
+    long long len = rd->lengthInSamples;
+    const double sr = rd->sampleRate;
+    if (len < 256 || sr < 8000.0) { error = "That file is too short or has an unusable sample rate."; return false; }
+    len = std::min (len, (long long) (sr * 15.0));                              // 15 s per layer (the samples are stored inside the FL project)
+    const int ch = (int) std::min (2u, std::max (1u, rd->numChannels));
+    juce::AudioBuffer<float> buf (ch, (int) len);
+    rd->read (&buf, 0, (int) len, 0, true, ch > 1);
+    float pk = 0.f;
+    for (int c = 0; c < ch; ++c) pk = std::max (pk, buf.getMagnitude (c, 0, (int) len));
+    if (pk < 1.0e-5f) { error = "That file is silent."; return false; }
+    buf.applyGain (0.9f / pk);
+    auto sd = std::make_shared<aio::SampleData>();
+    sd->sr = sr; sd->name = file.getFileNameWithoutExtension().toStdString();
+    sd->l.assign (buf.getReadPointer (0), buf.getReadPointer (0) + len);
+    if (ch > 1) sd->r.assign (buf.getReadPointer (1), buf.getReadPointer (1) + len);
+    {
+        const juce::SpinLock::ScopedLockType lk (layerSampleLock);
+        layerSamples[(size_t) layer] = sd;
+        layerSampleVer[(size_t) layer].fetch_add (1);
+    }
+    setParam (juce::String ("ly") + juce::String (layer) + "Src", 6.f);
+    setParam (juce::String ("ly") + juce::String (layer) + "On", 1.f);
+    setParam ("lyOn", 1.f);
+    return true;
+}
+
+void AIOProcessor::clearLayerSample (int layer)
+{
+    layer = std::clamp (layer, 0, aio::kLayers - 1);
+    const juce::SpinLock::ScopedLockType lk (layerSampleLock);
+    layerSamples[(size_t) layer] = nullptr;
+    layerSampleVer[(size_t) layer].fetch_add (1);
+}
+
+juce::String AIOProcessor::layerSampleName (int layer) const
+{
+    const juce::SpinLock::ScopedLockType lk (layerSampleLock);
+    const auto& s = layerSamples[(size_t) std::clamp (layer, 0, aio::kLayers - 1)];
+    return s ? juce::String (s->name) : juce::String();
+}
+
+// ================================================================================================
+// Voice changer
+// ================================================================================================
+void AIOProcessor::voiceChangerTone (float* l, float* r, int n, const Tx& tx, double energyIn)
+{
+    // the pitch shifter loses level when it moves the pitch a long way: follow the input level so the voice stays as loud as it was
+    double eOut = 0.0;
+    for (int i = 0; i < n; ++i) eOut += (double) l[i] * l[i] + (double) r[i] * r[i];
+    const double a = 1.0 - std::exp (-(double) n / (0.12 * currentSampleRate));
+    vcPin  += a * (energyIn / (2.0 * n) - vcPin);
+    vcPout += a * (eOut / (2.0 * n) - vcPout);
+    const bool shifting = std::abs (tx.vcPitch) > 0.05f || std::abs (tx.vcFormant) > 0.05f;
+    const float gWant = shifting && vcPin > 1.0e-8 && vcPout > 1.0e-9 ? std::clamp ((float) std::sqrt (vcPin / vcPout), 0.7f, 3.f) : 1.f;
+    const float gStart = vcGainSm;
+
+    const float warmth = f ("vcWarmth"), air = f ("vcAir");
+    if (warmth != vcWarmthApplied)
+    {
+        vcLow[0].c = vcLow[1].c = aio::Coeffs::make (aio::FilterType::LowShelf, currentSampleRate, 220.0, (double) warmth * 0.06, 0.707);
+        vcWarmthApplied = warmth;
+    }
+    if (air != vcAirApplied)
+    {
+        vcHigh[0].c = vcHigh[1].c = aio::Coeffs::make (aio::FilterType::HighShelf, currentSampleRate, 7500.0, (double) air * 0.08, 0.707);
+        vcAirApplied = air;
+    }
+    const float lvl = dbToGain (f ("vcLevel"));
+    const float g = 1.f + tx.vcGrit * 0.05f, gn = 1.f / std::pow (g, 0.75f);
+    const bool grit = tx.vcGrit > 0.5f;
+    for (int i = 0; i < n; ++i)
+    {
+        vcGainSm = gStart + (gWant - gStart) * (float) (i + 1) / (float) n;
+        float a = vcHigh[0].tick (vcLow[0].tick (l[i] * vcGainSm)), b = vcHigh[1].tick (vcLow[1].tick (r[i] * vcGainSm));
+        if (grit) { a = std::tanh (a * g) * gn; b = std::tanh (b * g) * gn; }
+        l[i] = a * lvl; r[i] = b * lvl;
+    }
+}
+
+namespace
+{
+struct VcPreset { const char* name; float pitch, formant, warmth, air, grit; };
+const std::vector<VcPreset>& voicePresets()
+{
+    static const std::vector<VcPreset> p = {
+        { "Deeper",            -4.f, -2.5f,  25.f,   0.f,  0.f },
+        { "Higher",             4.f,  2.5f,   0.f,  15.f,  0.f },
+        { "Deep and smooth",   -3.f, -1.5f,  55.f, -15.f,  8.f },
+        { "Smooth tenor",       2.f,  0.6f,  20.f,  25.f,  0.f },
+        { "Big movie voice",   -5.f, -3.5f,  60.f,  -5.f, 12.f },
+        { "Bright and young",   3.f,  3.f,  -10.f,  40.f,  0.f },
+        { "Giant",             -9.f, -6.f,   40.f, -20.f, 25.f },
+        { "Tiny",               8.f,  6.f,  -20.f,  30.f,  0.f },
+        { "Radio grit",         0.f,  0.f,  -20.f, -10.f, 45.f },
+    };
+    return p;
+}
+} // namespace
+
+int AIOProcessor::voicePresetCount() { return (int) voicePresets().size(); }
+const char* AIOProcessor::voicePresetName (int i) { return voicePresets()[(size_t) std::clamp (i, 0, voicePresetCount() - 1)].name; }
+void AIOProcessor::applyVoicePreset (int index)
+{
+    const auto& p = voicePresets()[(size_t) std::clamp (index, 0, voicePresetCount() - 1)];
+    setParam ("vcPitch", p.pitch); setParam ("vcFormant", p.formant); setParam ("vcWarmth", p.warmth);
+    setParam ("vcAir", p.air); setParam ("vcGrit", p.grit); setParam ("vcLevel", 0.f);
+    setParam ("vcOn", 1.f);
 }

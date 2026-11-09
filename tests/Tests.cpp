@@ -1091,6 +1091,33 @@ static void snapshots (const juce::File& dir)
         std::printf ("wrote %s\n", f.getFullPathName().toRawUTF8());
     }
 
+    // ---- the layers (a sound loaded, a chord held) and the voice morph (a starting point chosen)
+    {
+        proc.applyLayerPreset (0);
+        proc.setLayerKey (57);
+        for (int b = 0; b < 80; ++b) { juce::AudioBuffer<float> buf (2, 512); buf.clear(); juce::MidiBuffer mm; proc.processBlock (buf, mm); }
+        ed.showTab (ed.layersTabIndex());
+        pump (250);
+        auto img = ed.createComponentSnapshot (ed.getLocalBounds(), true, 1.0f);
+        juce::PNGImageFormat png;
+        auto f = dir.getChildFile ("layers.png");
+        f.deleteFile();
+        if (auto os = f.createOutputStream()) png.writeImageToStream (img, *os);
+        std::printf ("wrote %s\n", f.getFullPathName().toRawUTF8());
+        proc.setLayerKey (-1);
+        if (ed.morphTabIndex() >= 0)
+        {
+            proc.applyVoicePreset (2);
+            ed.showTab (ed.morphTabIndex());
+            pump (250);
+            auto img2 = ed.createComponentSnapshot (ed.getLocalBounds(), true, 1.0f);
+            auto f2 = dir.getChildFile ("voice_morph.png");
+            f2.deleteFile();
+            if (auto os = f2.createOutputStream()) png.writeImageToStream (img2, *os);
+            std::printf ("wrote %s\n", f2.getFullPathName().toRawUTF8());
+        }
+    }
+
     // ---- the vocal editor, with a clip, a couple of hand edits and a selection
     ed.showTab (8);
     pump (200);
@@ -1529,6 +1556,7 @@ static void testComposeUI()
 
 #include "VocalTests.inc"
 #include "TalkTests.inc"
+#include "LayerTests.inc"
 
 int main (int argc, char** argv)
 {
@@ -1543,6 +1571,12 @@ int main (int argc, char** argv)
     if (argc > 1 && juce::String (argv[1]) == "--talk")
     {
         testTalkBox(); testTalkProcessor(); testTalkUI();
+        std::printf ("\n%d checks, %d failed\n", checks, failures);
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc > 1 && juce::String (argv[1]) == "--layers")
+    {
+        testLayerEngine(); testVoiceChanger(); testLayerProcessor(); testLayerUI();
         std::printf ("\n%d checks, %d failed\n", checks, failures);
         return failures == 0 ? 0 : 1;
     }
@@ -1573,6 +1607,10 @@ int main (int argc, char** argv)
     testTalkBox();
     testTalkProcessor();
     testTalkUI();
+    testLayerEngine();
+    testVoiceChanger();
+    testLayerProcessor();
+    testLayerUI();
     std::printf ("\n%d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

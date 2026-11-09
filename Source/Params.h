@@ -307,6 +307,47 @@ inline Layout createLayout()
     addC (l, "tbPart",     "Talk Box Compose Part", { "Melody", "Synth / arp", "Bass" }, 0);
     addB (l, "tbMuteSyn",  "Talk Box Mute Compose Synth", true);
 
+    // ---- layers (Muze-style layer engine) ----
+    addB (l, "lyOn",       "Layers On", false);
+    addF (l, "lyLevel",    "Layers Level", -24.f, 12.f, 0.f, 0.f, 0.1f, "dB");
+    addF (l, "lyBright",   "Layers Brightness", -100.f, 100.f, 0.f, 0.f, 1.f, "%");
+    addF (l, "lyMotion",   "Layers Motion", 0.f, 200.f, 100.f, 0.f, 1.f, "%");
+    addF (l, "lyRelease",  "Layers Release", 25.f, 400.f, 100.f, 100.f, 1.f, "%");
+    addF (l, "lyVel",      "Layers Velocity", 0.f, 100.f, 60.f, 0.f, 1.f, "%");
+    addC (l, "lySource",   "Layers Notes From", { "MIDI / keys", "Compose chords", "Compose melody", "Compose synth / arp", "Compose bass" }, 0);
+    addB (l, "lyMuteSyn",  "Layers Mute Compose Synth", true);
+    addB (l, "lyHold",     "Layers Latch Keys", false);
+    for (int i = 0; i < 9; ++i)
+    {
+        const auto id = [i] (const char* s) { return juce::String ("ly") + juce::String (i) + s; };
+        const auto nm = [i] (const char* s) { return juce::String ("Layer ") + juce::String (i + 1) + " " + s; };
+        addB (l, id ("On"),     nm ("On"), i < 3);
+        addC (l, id ("Src"),    nm ("Sound"), { "Pad", "Drone", "Texture", "Impact", "Bell", "Airy choir", "Sample" }, i == 0 ? 0 : (i == 1 ? 1 : (i == 2 ? 2 : 0)));
+        addF (l, id ("Level"),  nm ("Level"), -48.f, 6.f, -8.f, 0.f, 0.1f, "dB");
+        addF (l, id ("Pan"),    nm ("Pan"), -100.f, 100.f, 0.f, 0.f, 1.f, "%");
+        addF (l, id ("Coarse"), nm ("Pitch"), -36.f, 36.f, 0.f, 0.f, 1.f, "st");
+        addF (l, id ("Fine"),   nm ("Fine"), -100.f, 100.f, 0.f, 0.f, 1.f, "ct");
+        addB (l, id ("Track"),  nm ("Follows Keys"), true);
+        addF (l, id ("Attack"), nm ("Attack"), 1.f, 8000.f, 20.f, 400.f, 1.f, "ms");
+        addF (l, id ("Release"),nm ("Release"), 10.f, 12000.f, 600.f, 1000.f, 1.f, "ms");
+        addF (l, id ("Cutoff"), nm ("Cutoff"), 60.f, 18000.f, 12000.f, 1500.f, 1.f, "Hz");
+        addF (l, id ("Reso"),   nm ("Resonance"), 0.f, 100.f, 10.f, 0.f, 1.f, "%");
+        addF (l, id ("Motion"), nm ("Motion"), 0.f, 100.f, 20.f, 0.f, 1.f, "%");
+        addF (l, id ("Drive"),  nm ("Drive"), 0.f, 100.f, 0.f, 0.f, 1.f, "%");
+        addF (l, id ("LoFi"),   nm ("Lo-Fi"), 0.f, 100.f, 0.f, 0.f, 1.f, "%");
+        addB (l, id ("Loop"),   nm ("Loop Sample"), true);
+        addB (l, id ("Lock"),   nm ("Lock"), false);
+    }
+
+    // ---- voice changer ----
+    addB (l, "vcOn",       "Voice Changer On", false);
+    addF (l, "vcPitch",    "Voice Changer Pitch", -9.f, 12.f, 0.f, 0.f, 0.1f, "st");
+    addF (l, "vcFormant",  "Voice Changer Formant", -8.f, 8.f, 0.f, 0.f, 0.1f, "st");
+    addF (l, "vcWarmth",   "Voice Changer Warmth", -100.f, 100.f, 0.f, 0.f, 1.f, "%");
+    addF (l, "vcAir",      "Voice Changer Air", -100.f, 100.f, 0.f, 0.f, 1.f, "%");
+    addF (l, "vcGrit",     "Voice Changer Grit", 0.f, 100.f, 0.f, 0.f, 1.f, "%");
+    addF (l, "vcLevel",    "Voice Changer Level", -12.f, 12.f, 0.f, 0.f, 0.1f, "dB");
+
     return l;
 }
 } // namespace aio

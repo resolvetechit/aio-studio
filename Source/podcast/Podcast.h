@@ -3,18 +3,20 @@
 #include <vector>
 #include <functional>
 #include <cstddef>
+#include <memory>
 
 namespace aio
 {
 namespace podcast
 {
 // ---------------------------------------------------------------------------------------------------------------
-// "Podcast Ready": an offline clean-up chain for a whole spoken-word file.
+// "Podcast Ready": an offline clean-up chain for a whole spoken-word file of any length.
 //
 //   declip (best effort)  ->  denoise (spectral Wiener)  ->  Auto Voice, speech mode (leveler, de-ess, tone, compression)
 //   ->  loudness normalise to a LUFS target  ->  look-ahead true-peak limiter
 //
-// Everything works on 1 or 2 channel float buffers of any length and sample rate.
+// Everything is streamed in chunks: the source is read through a ReadFn, intermediate results go through a Store (RAM
+// for the in-memory helpers, a temporary file for the plug-in), so memory use does not depend on the file length.
 // ---------------------------------------------------------------------------------------------------------------
 struct Options
 {
@@ -26,7 +28,7 @@ struct Options
     float comp = 0.7f;          // 0..1
     float targetLufs = -16.f;   // -24 .. -12   (-16 = stereo podcast standard, -19 = mono podcast standard)
     float ceilingDb = -1.f;     // true-peak ceiling
-    bool  mono = false;         // fold to mono before processing (output is a one-channel file)
+    bool  mono = false;         // fold to mono (output is a one-channel file)
 };
 
 struct Stats
@@ -51,17 +53,68 @@ struct Report
     bool   reachedTarget = false;
 };
 
-using Progress = std::function<bool (float)>;      // return false to cancel
+using Progress = std::function<bool (float)>;                                       // return false to cancel
+using ReadFn = std::function<bool (float* l, float* r, long long pos, int n)>;      // r is filled too (a copy of l for mono)
 
-// ---- measurements
+// Sequential store for audio between stages. append() is called in order, then finishWrite(), then read() at will.
+class Store
+{
+public:
+    virtual ~Store() = default;
+    virtual bool append (const float* l, const float* r, int n) = 0;
+    virtual bool finishWrite() = 0;
+    virtual bool read (float* l, float* r, long long pos, int n) = 0;
+    virtual long long length() const = 0;
+};
+
+class MemStore : public Store
+{
+public:
+    bool append (const float* l, const float* r, int n) override { L.insert (L.end(), l, l + n); R.insert (R.end(), r, r + n); return true; }
+    bool finishWrite() override { return true; }
+    bool read (float* l, float* r, long long pos, int n) override;
+    long long length() const override { return (long long) L.size(); }
+    std::vector<float> L, R;
+};
+
+struct ClipInfo
+{
+    bool on = false;             // enough flat tops to believe it
+    bool pos = false, neg = false;
+    float posLevel = 0.f, negLevel = 0.f;
+    long long clipped = 0;
+};
+
+struct NoiseProfile
+{
+    bool valid = false;
+    std::vector<double> psd;     // power per FFT bin, learned from the quietest stretches
+    double contrastDb = 0.0;     // loud frames vs quiet frames
+};
+
+struct Analysis
+{
+    bool valid = false;
+    double sampleRate = 0.0;
+    long long length = 0;
+    Stats stats;
+    ClipInfo clip[2];
+    NoiseProfile noise;
+    std::vector<float> waveform; // min,max pairs
+};
+
+// ---- whole-file stages
+Analysis analyse (const ReadFn& src, long long len, double sr, const Progress& prog);
+void scanClipping (const ReadFn& src, long long len, const Progress& prog, ClipInfo out[2]);
+// `dual` = the two channels are different (a true stereo source that is not folded to mono)
+bool processStream (const ReadFn& src, long long len, double sr, bool dual, const Analysis& a, const Options& o,
+                    Store& pre, Store& out, Report& rep, std::vector<float>* waveformAfter, const Progress& prog, int chunkFrames = 1 << 16);
+
+// ---- in-memory helpers (the same code, with RAM stores)
 Stats measure (const float* l, const float* r, size_t n, double sr);
 long long countClipped (const float* x, size_t n);
-
-// ---- stages (in place)
 long long declipChannel (float* x, size_t n);                                         // returns the number of samples rebuilt
 bool denoise (float* l, float* r, size_t n, double sr, float amount, bool& eased, const Progress& prog);   // r may equal l (mono) or be null
-
-// ---- the whole chain; `ch` has 1 or 2 channels and is processed in place. Returns false if cancelled.
-bool process (juce::AudioBuffer<float>& ch, double sr, const Options& o, Report& rep, const Progress& prog);
+bool process (juce::AudioBuffer<float>& ch, double sr, const Options& o, Report& rep, const Progress& prog, int chunkFrames = 1 << 16);
 } // namespace podcast
 } // namespace aio

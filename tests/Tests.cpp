@@ -1581,6 +1581,12 @@ int main (int argc, char** argv)
         std::printf ("\n%d checks, %d failed\n", checks, failures);
         return failures == 0 ? 0 : 1;
     }
+    if (argc > 1 && juce::String (argv[1]) == "--podcastlong")
+    {
+        testPodcastLong (argc > 2 ? juce::String (argv[2]).getDoubleValue() : 60.0);
+        std::printf ("\n%d checks, %d failed\n", checks, failures);
+        return failures == 0 ? 0 : 1;
+    }
     if (argc > 1 && juce::String (argv[1]) == "--podcast")
     {
         testPodcastDSP(); testPodcastSession(); testPodcastUI();

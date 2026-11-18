@@ -210,6 +210,33 @@ static void testPodcastDSP()
     }
 
     {
+        // streaming: the answer must not depend on how the file is cut into chunks (clipped + noisy, so every stage is busy)
+        float pk = 0.f; for (float v : clean.x) pk = std::max (pk, std::abs (v));
+        auto noisyIn = clean.x; addNoise (noisyIn, 0.005 / (1.8 / pk));
+        auto clipped = hardClip (noisyIn, 1.8f / pk, 0.8f);
+        auto b1 = toBuffer (clipped), b2 = toBuffer (clipped), b3 = toBuffer (clipped), b4 = toBuffer (clipped);
+        Report r1, r2, r3, r4;
+        process (b4, sr, Options(), r4, nullptr, 8192);
+        const bool ok1 = process (b1, sr, Options(), r1, nullptr, 1 << 16);
+        const bool ok2 = process (b2, sr, Options(), r2, nullptr, 1000);
+        const bool ok3 = process (b3, sr, Options(), r3, nullptr, 333);
+        double d2 = 0, d3 = 0;
+        for (int c = 0; c < 2; ++c) for (int i = 0; i < b1.getNumSamples(); ++i)
+        { d2 = std::max (d2, (double) std::abs (b1.getSample (c, i) - b2.getSample (c, i))); d3 = std::max (d3, (double) std::abs (b1.getSample (c, i) - b3.getSample (c, i))); }
+        double rmsDiffDb = 0;
+        {
+            double e = 0, dd = 0; int worst = 0;
+            for (int i = 0; i < b1.getNumSamples(); ++i) { const double d = b1.getSample (0, i) - b3.getSample (0, i); e += (double) b1.getSample (0, i) * b1.getSample (0, i); dd += d * d; if (std::abs (d) > std::abs (b1.getSample (0, worst) - b3.getSample (0, worst))) worst = i; }
+            double d4 = 0; for (int i = 0; i < b1.getNumSamples(); ++i) d4 = std::max (d4, (double) std::abs (b1.getSample (0, i) - b4.getSample (0, i)));
+            rmsDiffDb = 10.0 * std::log10 (e / std::max (dd, 1e-20));
+            std::printf ("      (rms diff %.1f dB below the signal, worst sample %d, 8192-chunk max diff %.2g)\n", rmsDiffDb, worst, d4);
+        }
+        CHECK (ok1 && ok2 && ok3 && rmsDiffDb > 55.0 && d2 < 6e-3 && d3 < 6e-3, "cutting the file into 65536 / 1000 / 333-sample chunks gives the same audio (%.0f dB below the signal, max diff %.2g / %.2g)", rmsDiffDb, d2, d3);
+        CHECK (r1.declipped == r2.declipped && r1.declipped == r3.declipped && r1.declipped > 100, "...and the same declip repairs (%lld / %lld / %lld)", r1.declipped, r2.declipped, r3.declipped);
+        CHECK (std::abs (r1.after.lufs - r2.after.lufs) < 0.05, "...and the same loudness (%.2f / %.2f)", r1.after.lufs, r2.after.lufs);
+    }
+
+    {
         // too quiet and too hot both land on the target
         Options o; Report r1, r2;
         auto speech = clean.x; addNoise (speech, 0.002);
@@ -345,6 +372,7 @@ static void testPodcastSession()
         double e = 0; size_t cnt = 0; peak = 0.f; bool fin = true;
         for (int b = 0; b < 300; ++b)
         {
+            waitFor ([&] { return pc.bufferedMs() >= 30; }, 3000);      // the streaming player fills in the background
             buf.clear(); proc.processBlock (buf, m);
             for (int c = 0; c < 2; ++c) for (int k = 0; k < 512; ++k) { const float v = buf.getSample (c, k); fin = fin && std::isfinite (v); e += (double) v * v; ++cnt; peak = std::max (peak, std::abs (v)); }
         }
@@ -433,12 +461,30 @@ static void testPodcastSession()
         q.abOriginal = false; q.seek (0.0); q.setPlaying (true);
         juce::AudioBuffer<float> buf (2, 512); juce::MidiBuffer m;
         double e = 0, d = 0; int secs = 0;
-        for (int b = 0; b < 100; ++b) { buf.clear(); p2.processBlock (buf, m); for (int k = 0; k < 512; ++k) { e += buf.getSample (0, k) * buf.getSample (0, k); d += std::abs (buf.getSample (0, k) - buf.getSample (1, k)); } ++secs; }
+        for (int b = 0; b < 100; ++b) { waitFor ([&] { return q.bufferedMs() >= 30; }, 3000); buf.clear(); p2.processBlock (buf, m); for (int k = 0; k < 512; ++k) { e += buf.getSample (0, k) * buf.getSample (0, k); d += std::abs (buf.getSample (0, k) - buf.getSample (1, k)); } ++secs; }
         q.setPlaying (false);
         CHECK (e > 1.0 && d < 1e-3, "preview resamples 48 kHz -> 44.1 kHz and plays on both channels (energy %.1f)", e);
         const double pos0 = q.position();
         q.seek (0.5);
         CHECK (std::abs (q.position() - 0.5) < 0.01 && pos0 >= 0.0, "seeking works (%.2f)", q.position());
+    }
+
+    // ---- temporary files are cleaned up
+    {
+        auto countTemp = [] { return juce::File::getSpecialLocation (juce::File::tempDirectory).findChildFiles (juce::File::findDirectories, false, "AIOStudioPodcast_*").size(); };
+        const int before = countTemp();
+        {
+            AIOProcessor p4; p4.setPlayConfigDetails (2, 2, sr, 512); p4.prepareToPlay (sr, 512);
+            p4.getPodcast().loadFile (in);
+            waitFor ([&] { return ! p4.getPodcast().busy(); }, 20000);
+            p4.runPodcast();
+            waitFor ([&] { return ! p4.getPodcast().busy(); }, 120000);
+            CHECK (countTemp() == before + 1, "the result lives in one temporary folder while it is needed");
+            p4.runPodcast();
+            waitFor ([&] { return ! p4.getPodcast().busy(); }, 120000);
+            CHECK (countTemp() == before + 1, "running again replaces it instead of piling up");
+        }
+        CHECK (countTemp() == before, "closing the plug-in removes the temporary files");
     }
 
     // ---- bad input
@@ -518,4 +564,83 @@ static void testPodcastUI()
     if (auto os = out.createOutputStream()) png.writeImageToStream (img, *os);
     std::printf ("wrote %s\n", out.getFullPathName().toRawUTF8());
 #endif
+}
+
+// -----------------------------------------------------------------------------------------------------------------
+// Long-file streaming test (run with:  AIOTests --podcastlong [minutes])   -  not part of the normal suite because of its run time
+static long peakRssMB()
+{
+    long kb = 0;
+    juce::StringArray lines; lines.addLines (juce::File ("/proc/self/status").loadFileAsString());
+    for (auto& l : lines) if (l.startsWith ("VmHWM:")) kb = l.fromFirstOccurrenceOf (":", false, false).trim().getIntValue();
+    return kb / 1024;
+}
+
+static void testPodcastLong (double minutes)
+{
+    std::printf ("\n== Podcast Ready: %.0f minute file, streamed from disk ==\n", minutes);
+    const double sr = 48000.0;
+    auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("aio_podcast_long");
+    dir.createDirectory();
+    auto f = dir.getChildFile ("long.wav"); f.deleteFile();
+    {
+        auto sp = makeSpeech (sr, 40);
+        addNoise (sp.x, 0.004);
+        float pk = 0.f; for (float v : sp.x) pk = std::max (pk, std::abs (v));
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::FileOutputStream> os (f.createOutputStream());
+        std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (os.get(), sr, 2, 24, {}, 0));
+        os.release();
+        const long long total = (long long) (minutes * 60.0 * sr);
+        long long done = 0; int piece = 0;
+        juce::AudioBuffer<float> b (2, (int) sp.x.size());
+        while (done < total)
+        {
+            // every piece is recorded at a different level (as a real recording is) but clips at the same digital ceiling
+            const float lvl = 0.6f + 0.4f * (float) ((piece * 37) % 11) / 10.f;
+            const auto clipped = hardClip (sp.x, 1.8f * lvl / pk, 0.8f);
+            for (int c = 0; c < 2; ++c) for (size_t i = 0; i < clipped.size(); ++i) b.setSample (c, (int) i, clipped[i]);
+            const int n = (int) std::min<long long> ((long long) sp.x.size(), total - done);
+            w->writeFromAudioSampleBuffer (b, 0, n);
+            done += n; ++piece;
+        }
+    }
+    std::printf ("      test file: %.2f GB\n", (double) f.getSize() / 1.0e9);
+    const long rssBefore = peakRssMB();
+
+    AIOProcessor proc; proc.setPlayConfigDetails (2, 2, 44100.0, 512); proc.prepareToPlay (44100.0, 512);
+    auto& pc = proc.getPodcast();
+    const double t0 = juce::Time::getMillisecondCounterHiRes();
+    pc.loadFile (f);
+    CHECK (waitFor ([&] { return ! pc.busy(); }, 3600000) && pc.info().hasFile, "the file loads and is analysed (%.1f min, %.0f s)", pc.info().seconds / 60.0, (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0);
+    const double t1 = juce::Time::getMillisecondCounterHiRes();
+    proc.applyPodcastPreset (0);
+    proc.runPodcast();
+    CHECK (waitFor ([&] { return ! pc.busy(); }, 7200000) && pc.state() == aio::PodcastSession::Idle, "processing finishes in %.0f s (%.0fx real time)", (juce::Time::getMillisecondCounterHiRes() - t1) / 1000.0, pc.info().seconds / ((juce::Time::getMillisecondCounterHiRes() - t1) / 1000.0));
+    const auto i = pc.info();
+    CHECK (i.hasResult && std::abs (i.report.after.lufs + 16.0) < 0.7 && i.report.after.truePeakDb <= -0.9, "whole file at the target: %.2f LUFS, %.2f dBTP", i.report.after.lufs, i.report.after.truePeakDb);
+    CHECK (i.report.declipped > 1000 && i.report.after.clipped * 500 < i.report.declipped, "clipping repaired across the whole file (%lld rebuilt, %lld left flat)", i.report.declipped, i.report.after.clipped);
+    const long rssAfter = peakRssMB();
+    CHECK (rssAfter < 1500, "memory stays small: peak %ld MB (was %ld MB before)", rssAfter, rssBefore);
+
+    // preview near the end, then play past the end without looping
+    pc.abOriginal = false; pc.loop = false; pc.seek (0.9995); pc.setPlaying (true);
+    juce::AudioBuffer<float> buf (2, 512); juce::MidiBuffer m;
+    double e = 0; int blocks = 0;
+    for (; blocks < 4000 && pc.isPlaying(); ++blocks)
+    {
+        waitFor ([&] { return pc.bufferedMs() >= 30 || ! pc.isPlaying(); }, 3000);
+        buf.clear(); proc.processBlock (buf, m);
+        for (int k = 0; k < 512; ++k) e += std::abs (buf.getSample (0, k));
+    }
+    CHECK (e > 1.0 && ! pc.isPlaying(), "the last seconds play and it stops at the end (%d blocks)", blocks);
+
+    auto out = dir.getChildFile ("long_out.wav"); out.deleteFile();
+    const double t2 = juce::Time::getMillisecondCounterHiRes();
+    proc.exportPodcast (out, 16);
+    juce::String msg; bool done = false;
+    waitFor ([&] { if (pc.busy()) return false; done = pc.takeExportDone (msg); return done; }, 3600000);
+    CHECK (done && std::abs ((double) out.getSize() - i.seconds * sr * 4.0) < 1e6, "exported 16-bit WAV (%.2f GB, %.0f s)", (double) out.getSize() / 1.0e9, (juce::Time::getMillisecondCounterHiRes() - t2) / 1000.0);
+    std::printf ("      peak memory over the whole run: %ld MB\n", peakRssMB());
+    out.deleteFile(); f.deleteFile();
 }

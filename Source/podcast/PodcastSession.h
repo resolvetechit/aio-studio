@@ -3,15 +3,18 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
 #include <atomic>
-#include <array>
 #include <memory>
 #include <functional>
 #include "Podcast.h"
 
 namespace aio
 {
-// Loads a whole spoken-word file, runs the Podcast Ready chain on a worker thread, plays original / result through the
-// plug-in for auditioning (audio-thread safe) and exports the result. Mirrors MasterSession so the two feel the same.
+class PodcastPlayer;
+class FileStore;
+
+// Loads a voice recording of any length (it is analysed and processed in chunks, results go to temporary files on disk),
+// runs the Podcast Ready chain on a worker thread, streams original / result through the plug-in for auditioning
+// (audio-thread safe) and exports the result. Mirrors MasterSession so the two feel the same.
 class PodcastSession
 {
 public:
@@ -29,7 +32,7 @@ public:
         std::vector<float> waveform, waveformAfter;     // min,max pairs
     };
 
-    static constexpr long long kMaxSamples = 80000000LL;   // frames x channels per buffer (~320 MB)
+    static constexpr double kMaxSeconds = 4.0 * 3600.0;
 
     PodcastSession();
     ~PodcastSession();
@@ -51,10 +54,12 @@ public:
     // ---- playback (audio thread safe)
     void prepare (double hostSampleRate);
     bool isPlaying() const { return playing.load(); }
-    void setPlaying (bool p) { if (p && playPtrOrig.load() == nullptr) return; playing.store (p); }
+    void setPlaying (bool p);
     void seek (double normalised);
     double position() const;
     void readPlayback (float* l, float* r, int n);
+    int  bufferedMs() const;                 // how much audio the player has ready (for tests and the UI)
+    int  underruns() const;
     std::atomic<bool> abOriginal { false };
     std::atomic<bool> matchVolume { true };
     std::atomic<bool> loop { true };
@@ -64,9 +69,7 @@ private:
     class Job;
     void startJob (int initialState, std::function<void()> fn);
     void setMessage (const juce::String& m);
-    void rebuildPlayback();
-    static std::shared_ptr<juce::AudioBuffer<float>> resampled (const std::shared_ptr<juce::AudioBuffer<float>>& src, double srcSr, double dstSr);
-    static void makeWaveform (const juce::AudioBuffer<float>& b, std::vector<float>& out);
+    void clearTemp();
 
     juce::AudioFormatManager formats;
     std::unique_ptr<Job> job;
@@ -77,14 +80,16 @@ private:
     Info infoV;
     juce::String msg, exportMsg;
     bool exportDone = false;
-    std::shared_ptr<juce::AudioBuffer<float>> original, processed;
-    double hostSr = 44100.0;
 
-    std::atomic<const juce::AudioBuffer<float>*> playPtrOrig { nullptr }, playPtrProc { nullptr };
-    std::array<std::shared_ptr<juce::AudioBuffer<float>>, 6> keep;
-    int keepPos = 0;
+    juce::File sourceFile, tempDir;
+    std::shared_ptr<podcast::Analysis> analysis;
+    bool sourceDual = false;
+    std::shared_ptr<FileStore> finalStore;
+
+    std::unique_ptr<PodcastPlayer> player;
     std::atomic<bool> playing { false };
-    std::atomic<long long> playPos { 0 };
     std::atomic<float> matchGainLin { 1.f };
+    std::atomic<bool> resultPlayable { false };
+    double hostSrCache = 44100.0;
 };
 } // namespace aio

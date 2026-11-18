@@ -348,6 +348,17 @@ inline Layout createLayout()
     addF (l, "vcGrit",     "Voice Changer Grit", 0.f, 100.f, 0.f, 0.f, 1.f, "%");
     addF (l, "vcLevel",    "Voice Changer Level", -12.f, 12.f, 0.f, 0.f, 0.1f, "dB");
 
+    // ---- podcast ready ----
+    addB (l, "pcDeclip",   "Podcast Repair Clipping", true);
+    addF (l, "pcDenoise",  "Podcast Noise Reduction", 0.f, 100.f, 55.f, 0.f, 1.f, "%");
+    addF (l, "pcLevel",    "Podcast Voice Leveler", 0.f, 100.f, 100.f, 0.f, 1.f, "%");
+    addF (l, "pcTone",     "Podcast Tone", 0.f, 100.f, 70.f, 0.f, 1.f, "%");
+    addF (l, "pcDeEss",    "Podcast De-Ess", 0.f, 100.f, 60.f, 0.f, 1.f, "%");
+    addF (l, "pcComp",     "Podcast Compression", 0.f, 100.f, 70.f, 0.f, 1.f, "%");
+    addF (l, "pcTarget",   "Podcast Loudness Target", -24.f, -12.f, -16.f, 0.f, 0.5f, "LUFS");
+    addF (l, "pcCeil",     "Podcast Peak Ceiling", -6.f, -0.1f, -1.f, 0.f, 0.1f, "dBTP");
+    addB (l, "pcMono",     "Podcast Mono Output", false);
+
     return l;
 }
 } // namespace aio

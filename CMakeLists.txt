@@ -33,6 +33,8 @@ set(AIO_SOURCES
     Source/compose/Styles.cpp
     Source/master/MasterEngine.cpp
     Source/master/MasterSession.cpp
+    Source/podcast/Podcast.cpp
+    Source/podcast/PodcastSession.cpp
     Source/sing/Sing.cpp
     Source/vocal/VocalEngine.cpp
     Source/vocal/VocalSession.cpp)

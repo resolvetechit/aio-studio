@@ -536,6 +536,7 @@ private:
 
 #include "ui/NewPanels.inc"
 #include "ui/LayersUI.inc"
+#include "ui/PodcastUI.inc"
 
 // =================================================================================================
 // Editor
@@ -561,10 +562,12 @@ AIOEditor::AIOEditor (AIOProcessor& p) : AudioProcessorEditor (&p), proc (p)
     vocalPanel = std::make_unique<VocalPanel> (p);
     talkPanel  = std::make_unique<TalkPanel> (p);
     morphPanel = std::make_unique<MorphPanel> (p);
+    podcastPanel = std::make_unique<PodcastPanel> (p);
     addTab (master.get(), "MASTER", col::accent2); addTab (voicePanel.get(), "VOICE", col::chords); addTab (singPanel.get(), "SING", col::melody);
     addTab (vocalPanel.get(), "VOCAL EDIT", col::bass); addTab (talkPanel.get(), "TALK BOX", juce::Colour (0xfff2a03d));
     layersTab = panels.size(); addTab (layersPanel.get(), "LAYERS", aio::ui::layersCol);
     morphTab = panels.size();  addTab (morphPanel.get(), "MORPH", aio::ui::morphCol);
+    podcastTab = panels.size(); addTab (podcastPanel.get(), "PODCAST", juce::Colour (0xff5ec8ff));
 #else
     layersTab = panels.size(); addTab (layersPanel.get(), "LAYERS", aio::ui::layersCol);
 #endif
@@ -667,7 +670,7 @@ void AIOEditor::paint (juce::Graphics& g)
     #if JucePlugin_IsSynth
     g.drawText ("tune  /  eq  /  dynamics  /  space  /  compose  /  layers", 20, 58, 340, 16, juce::Justification::centredLeft);
 #else
-    g.drawText ("tune / eq / dynamics / space / compose / master / voice / sing / vocal edit / talk box / layers / voice morph", 20, 58, 520, 16, juce::Justification::centredLeft);
+    g.drawText ("tune / eq / dynamics / space / compose / master / voice / sing / vocal edit / talk box / layers / voice morph / podcast", 20, 58, 520, 16, juce::Justification::centredLeft);
 #endif
 }
 
@@ -687,7 +690,7 @@ void AIOEditor::resized()
     presetBox.setBounds (top.removeFromLeft (560).withTrimmedLeft (330).withHeight (28).translated (0, 22));
 
     auto tabs = b.removeFromTop (34).reduced (16, 0);
-    const int tw = std::min (panels.size() > 6 ? 143 : 150, tabs.getWidth() / std::max (1, panels.size()));
+    const int tw = std::min (panels.size() > 12 ? 128 : (panels.size() > 6 ? 143 : 150), tabs.getWidth() / std::max (1, panels.size()));
     for (auto* t : tabButtons) { t->setBounds (tabs.removeFromLeft (tw).withTrimmedRight (6)); }
 
     b.removeFromTop (8);

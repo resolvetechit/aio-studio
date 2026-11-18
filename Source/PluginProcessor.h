@@ -18,6 +18,7 @@
 #include "compose/Styles.h"
 #include "master/MasterEngine.h"
 #include "master/MasterSession.h"
+#include "podcast/PodcastSession.h"
 #include "sing/Sing.h"
 #include "vocal/VocalSession.h"
 
@@ -112,6 +113,15 @@ public:
     // ---- Auto Master
     aio::MasterSession& getMaster() { return master; }
     aio::LiveLearn&     getLearn()  { return learn; }
+
+    // ---- Podcast Ready
+    aio::PodcastSession& getPodcast() { return podcast; }
+    aio::podcast::Options readPodcastOptions() const;
+    void runPodcast();                                   // offline: needs a loaded file
+    void exportPodcast (const juce::File& out, int bitDepth);
+    static int  podcastPresetCount();
+    static const char* podcastPresetName (int index);
+    void applyPodcastPreset (int index);                 // message thread
     aio::MasterOptions  readMasterOptions() const;
     void applyMasterSettings (const aio::MasterSettings&);
     void analyseAndMaster();                            // offline: needs a loaded file
@@ -247,6 +257,7 @@ private:
 
     // Auto Master
     aio::MasterSession master;
+    aio::PodcastSession podcast;
     aio::VocalSession vocal;
     aio::LiveLearn learn;
     mutable juce::CriticalSection learnLock;

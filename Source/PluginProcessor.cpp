@@ -9,7 +9,7 @@ using namespace aio;
 // Per-block transport / mode information handed to processChunk
 struct AIOProcessor::Tx
 {
-    bool fileMode = false, fileOriginal = false;
+    bool fileMode = false, fileOriginal = false, podMode = false;
     bool composeRun = false, singRun = false;
     bool tunerActive = false, assist = false, guideOn = false;
     float guideLevel = 0.5f;
@@ -91,6 +91,7 @@ void AIOProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     guide.prepare (sampleRate);
     learn.prepare (sampleRate);
     master.prepare (sampleRate);
+    podcast.prepare (sampleRate);
     vocal.prepare (sampleRate);
     talk.prepare (sampleRate);
     talkKeyApplied = -1; talkSourceApplied = -1; tbEvN = 0;
@@ -366,7 +367,7 @@ void AIOProcessor::audition (int part, int note, int vel, int lenMs)
 
 void AIOProcessor::parameterChanged (const juce::String& id, float)
 {
-    if (id.startsWith ("ly") || id.startsWith ("vc") || id.startsWith ("tb") || id.startsWith ("ved")) return;     // sound-engine controls never change the generated pattern
+    if (id.startsWith ("ly") || id.startsWith ("vc") || id.startsWith ("tb") || id.startsWith ("ved") || id.startsWith ("pc")) return;     // sound-engine controls never change the generated pattern
     patternDirty = true;
     triggerAsyncUpdate();
 }
@@ -571,7 +572,7 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
         float* vl = buffer.getWritePointer (0);
         float* vr = buffer.getWritePointer (1);
         vocal.capture (vl, vr, total, hostPlaying, hostBeat);
-        if (! master.isPlaying())
+        if (! master.isPlaying() && ! podcast.isPlaying())
             vocalReplaced = vocal.process (vl, vr, total, hostPlaying, hostBeat, bpm, readVocalPlay());
     }
 #endif
@@ -579,7 +580,8 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
     // ---------------------------------------------------------------- parameters, once per block
     const ChainParams cpFull = readChainParams (bpm);
 
-    const bool fileMode = master.isPlaying();
+    const bool podMode = ! master.isPlaying() && podcast.isPlaying();      // Podcast Ready preview: the file replaces the input, the chain is bypassed
+    const bool fileMode = master.isPlaying() || podMode;
     const ChainParams cp = fileMode ? cpFull.masterOnly() : cpFull;
 
     const bool composeOnParam = f ("cmpOn") > 0.5f;
@@ -590,6 +592,7 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
 
     Tx tx;
     tx.fileMode = fileMode;
+    tx.podMode = podMode;
     tx.fileOriginal = fileMode && master.abOriginal.load();
     tx.tunerActive = tunerLatencyOn && ! fileMode && ! vocalReplaced;
     tx.assist = assistWanted;
@@ -752,7 +755,16 @@ void AIOProcessor::processChunk (float* l, float* r, int n, int chunkOffset, con
 {
     float op = 0.f;
 
-    if (tx.fileMode)
+    if (tx.podMode)
+    {
+        // ---- Podcast Ready preview: already levelled and limited by the offline chain, so it goes straight out
+        podcast.readPlayback (l, r, n);
+        float pk = 0.f;
+        for (int i = 0; i < n; ++i) pk = std::max ({ pk, std::abs (l[i]), std::abs (r[i]) });
+        inPeak.store (pk);
+        op = pk;
+    }
+    else if (tx.fileMode)
     {
         // ---- file audition: the loaded file replaces the input and goes through the master chain only
         master.readPlayback (l, r, n);
@@ -1548,4 +1560,57 @@ void AIOProcessor::applyVoicePreset (int index)
     setParam ("vcPitch", p.pitch); setParam ("vcFormant", p.formant); setParam ("vcWarmth", p.warmth);
     setParam ("vcAir", p.air); setParam ("vcGrit", p.grit); setParam ("vcLevel", 0.f);
     setParam ("vcOn", 1.f);
+}
+
+// ------------------------------------------------------------------------------------------------
+// Podcast Ready glue (message thread)
+aio::podcast::Options AIOProcessor::readPodcastOptions() const
+{
+    aio::podcast::Options o;
+    o.declip = f ("pcDeclip") > 0.5f;
+    o.denoise = f ("pcDenoise") * 0.01f;
+    o.level = f ("pcLevel") * 0.01f;
+    o.tone = f ("pcTone") * 0.01f;
+    o.deess = f ("pcDeEss") * 0.01f;
+    o.comp = f ("pcComp") * 0.01f;
+    o.targetLufs = f ("pcTarget");
+    o.ceilingDb = f ("pcCeil");
+    o.mono = f ("pcMono") > 0.5f;
+    return o;
+}
+
+void AIOProcessor::runPodcast()
+{
+    podcast.setPlaying (false);
+    podcast.run (readPodcastOptions());
+}
+
+void AIOProcessor::exportPodcast (const juce::File& out, int bitDepth) { podcast.exportFile (out, bitDepth); }
+
+namespace
+{
+struct PodPreset { const char* name; float target, ceil, denoise, level, tone, deess, comp; bool mono; };
+const PodPreset* podPresets()
+{
+    static const PodPreset p[] = {
+        { "Podcast (stereo, -16)",     -16.f, -1.f, 55.f, 100.f, 70.f, 60.f, 70.f, false },
+        { "Podcast (mono, -19)",       -19.f, -1.f, 55.f, 100.f, 70.f, 60.f, 70.f, true  },
+        { "Video voice-over (-14)",    -14.f, -1.f, 55.f, 100.f, 70.f, 60.f, 80.f, false },
+        { "Noisy room / interview",    -16.f, -1.f, 85.f, 100.f, 60.f, 65.f, 75.f, false },
+        { "Audiobook (ACX-style)",     -20.f, -3.f, 70.f, 90.f,  60.f, 60.f, 60.f, true  },
+        { "Gentle (keep it natural)",  -16.f, -1.f, 30.f, 60.f,  40.f, 40.f, 45.f, false } };
+    return p;
+}
+constexpr int kPodPresets = 6;
+}
+
+int AIOProcessor::podcastPresetCount() { return kPodPresets; }
+const char* AIOProcessor::podcastPresetName (int index) { return podPresets()[std::clamp (index, 0, kPodPresets - 1)].name; }
+
+void AIOProcessor::applyPodcastPreset (int index)
+{
+    const auto& p = podPresets()[std::clamp (index, 0, kPodPresets - 1)];
+    setParam ("pcTarget", p.target); setParam ("pcCeil", p.ceil); setParam ("pcDenoise", p.denoise);
+    setParam ("pcLevel", p.level); setParam ("pcTone", p.tone); setParam ("pcDeEss", p.deess); setParam ("pcComp", p.comp);
+    setParam ("pcMono", p.mono ? 1.f : 0.f); setParam ("pcDeclip", 1.f);
 }

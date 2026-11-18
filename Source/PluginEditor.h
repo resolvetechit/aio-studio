@@ -22,13 +22,14 @@ public:
     aio::ui::CharacterPad* characterPad(); // the character map of the VOICE MORPH tab (nullptr in the instrument build); used by tests
     int  layersTabIndex() const { return layersTab; }
     int  morphTabIndex() const { return morphTab; }
+    int  podcastTabIndex() const { return podcastTab; }
     void selectTab (int index) { showTab (index); }
     aio::ui::TalkKeys*  talkKeys();      // the on-screen keys of the TALK BOX tab (nullptr in the instrument build); used by tests     // the note editor of the VOCAL EDIT tab (nullptr in the instrument build); used by tests
 
 private:
     struct PanelBase : public juce::Component {};
     class TunePanel; class EQPanel; class DynPanel; class SpacePanel; class ComposePanel;
-    class MasterPanel; class VoicePanel; class SingPanel; class VocalPanel; class TalkPanel; class LayersPanel; class MorphPanel;
+    class MasterPanel; class VoicePanel; class SingPanel; class VocalPanel; class TalkPanel; class LayersPanel; class MorphPanel; class PodcastPanel;
 
     void timerCallback() override;
 
@@ -55,9 +56,10 @@ private:
     std::unique_ptr<VocalPanel>   vocalPanel;
     std::unique_ptr<TalkPanel>    talkPanel;
     std::unique_ptr<MorphPanel>   morphPanel;
+    std::unique_ptr<PodcastPanel> podcastPanel;
 #endif
     juce::Array<juce::Component*> panels;
-    int currentTab = 0, layersTab = -1, morphTab = -1;
+    int currentTab = 0, layersTab = -1, morphTab = -1, podcastTab = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AIOEditor)
 };

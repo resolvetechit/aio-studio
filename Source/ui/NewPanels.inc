@@ -60,6 +60,7 @@ public:
         playBtn.onClick = [this]
         {
             auto& m = proc.getMaster();
+            if (! m.isPlaying()) proc.getPodcast().setPlaying (false);       // one file at a time
             m.setPlaying (! m.isPlaying());
         };
         loopBtn.onClick = [this] { proc.getMaster().loop = loopBtn.getToggleState(); };

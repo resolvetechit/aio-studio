@@ -1557,6 +1557,7 @@ static void testComposeUI()
 #include "VocalTests.inc"
 #include "TalkTests.inc"
 #include "LayerTests.inc"
+#include "PodcastTests.inc"
 
 int main (int argc, char** argv)
 {
@@ -1577,6 +1578,12 @@ int main (int argc, char** argv)
     if (argc > 1 && juce::String (argv[1]) == "--layers")
     {
         testLayerEngine(); testVoiceChanger(); testLayerProcessor(); testLayerUI();
+        std::printf ("\n%d checks, %d failed\n", checks, failures);
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc > 1 && juce::String (argv[1]) == "--podcast")
+    {
+        testPodcastDSP(); testPodcastSession(); testPodcastUI();
         std::printf ("\n%d checks, %d failed\n", checks, failures);
         return failures == 0 ? 0 : 1;
     }
@@ -1611,6 +1618,9 @@ int main (int argc, char** argv)
     testVoiceChanger();
     testLayerProcessor();
     testLayerUI();
+    testPodcastDSP();
+    testPodcastSession();
+    testPodcastUI();
     std::printf ("\n%d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

@@ -34,6 +34,8 @@ set(AIO_SOURCES
     Source/master/MasterEngine.cpp
     Source/master/MasterSession.cpp
     Source/podcast/Podcast.cpp
+    Source/podcast/Speakers.cpp
+    Source/podcast/MediaDecode.cpp
     Source/podcast/PodcastSession.cpp
     Source/sing/Sing.cpp
     Source/vocal/VocalEngine.cpp

@@ -1581,6 +1581,40 @@ int main (int argc, char** argv)
         std::printf ("\n%d checks, %d failed\n", checks, failures);
         return failures == 0 ? 0 : 1;
     }
+    if (argc > 2 && juce::String (argv[1]) == "--speakers") { speakerReport (juce::File (argv[2]), argc > 3 ? juce::String (argv[3]).getIntValue() : 0); return 0; }
+    if (argc > 1 && juce::String (argv[1]) == "--dbg96")
+    {
+        const double sr = argc > 2 ? juce::String (argv[2]).getDoubleValue() : 96000.0;
+        juce::AudioBuffer<float> base (1, (int) (sr * 20.0));
+        for (int k = 0; k < base.getNumSamples(); ++k) base.setSample (0, k, 0.5f * std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * k / sr) * (0.6f + 0.4f * std::sin (k * 3.0e-5f)));
+        auto rough = [&] (const char* name, aio::podcast::Options o)
+        {
+            auto b = base; aio::podcast::Report rep;
+            aio::podcast::process (b, sr, o, rep, nullptr);
+            double e2 = 0, mx = 0; size_t cnt = 0; size_t at = 0;
+            for (int k = 4096; k + 1 < b.getNumSamples(); ++k) { const double d = (double) b.getSample (0, k + 1) - 2.0 * b.getSample (0, k) + b.getSample (0, k - 1); e2 += d * d; if (std::abs (d) > mx) { mx = std::abs (d); at = (size_t) k; } ++cnt; }
+            std::printf ("%-24s peak/rms of 2nd diff %.2f at %zu\n", name, mx / std::max (1e-12, std::sqrt (e2 / (double) cnt)), at);
+        };
+        {
+            const auto a = aio::podcast::analyse ([&] (float* l, float* r, long long pos, int n) { for (int i = 0; i < n; ++i) l[i] = r[i] = base.getSample (0, (int) pos + i); return true; }, base.getNumSamples(), sr, nullptr);
+            std::printf ("voices %d, chunks %d, noise valid %d contrast %.1f dB\n", a.speakers.count, (int) a.speakers.chunks.size(), (int) a.noise.valid, a.noise.contrastDb);
+            for (auto& c : a.speakers.chunks) std::printf ("  chunk %.1f-%.1f s f0 %.0f lvl %.1f\n", (double) c.a / sr, (double) c.b / sr, c.f0, c.levelDb);
+        }
+        aio::podcast::Options o;
+        rough ("defaults", o);
+        auto o2 = o; o2.speakers = false; rough ("speakers off", o2);
+        auto o3 = o; o3.denoise = 0.f; rough ("denoise off", o3);
+        auto o4 = o; o4.tone = 0.f; rough ("tone off", o4);
+        auto o5 = o; o5.comp = 0.f; o5.level = 0.f; rough ("comp+level off", o5);
+        auto o6 = o; o6.deess = 0.f; rough ("deess off", o6);
+        return 0;
+    }
+    if (argc > 1 && juce::String (argv[1]) == "--voices")
+    {
+        testPodcastVoices(); testPodcastExtras(); testPodcastFiles();
+        std::printf ("\n%d checks, %d failed\n", checks, failures);
+        return failures == 0 ? 0 : 1;
+    }
     if (argc > 1 && juce::String (argv[1]) == "--podcastlong")
     {
         testPodcastLong (argc > 2 ? juce::String (argv[2]).getDoubleValue() : 60.0);
@@ -1589,7 +1623,7 @@ int main (int argc, char** argv)
     }
     if (argc > 1 && juce::String (argv[1]) == "--podcast")
     {
-        testPodcastDSP(); testPodcastSmooth(); testPodcastSession(); testPodcastLive(); testPodcastUI();
+        testPodcastDSP(); testPodcastSmooth(); testPodcastSession(); testPodcastLive(); testPodcastVoices(); testPodcastExtras(); testPodcastFiles(); testPodcastUI();
         std::printf ("\n%d checks, %d failed\n", checks, failures);
         return failures == 0 ? 0 : 1;
     }
@@ -1627,7 +1661,7 @@ int main (int argc, char** argv)
     testPodcastDSP();
     testPodcastSmooth();
     testPodcastSession();
-    testPodcastLive();
+    testPodcastLive(); testPodcastVoices(); testPodcastExtras(); testPodcastFiles();
     testPodcastUI();
     std::printf ("\n%d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

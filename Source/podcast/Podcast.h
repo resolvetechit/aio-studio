@@ -4,6 +4,7 @@
 #include <functional>
 #include <cstddef>
 #include <memory>
+#include "Speakers.h"
 
 namespace aio
 {
@@ -12,8 +13,9 @@ namespace podcast
 // ---------------------------------------------------------------------------------------------------------------
 // "Podcast Ready": an offline clean-up chain for a whole spoken-word file of any length.
 //
-//   declip (best effort)  ->  denoise (spectral Wiener)  ->  Auto Voice, speech mode (leveler, de-ess, tone, compression)
-//   ->  loudness normalise to a LUFS target  ->  look-ahead true-peak limiter
+//   declip (best effort)  ->  low cut  ->  denoise + echo reduction (spectral Wiener)  ->  per-voice EQ and balance
+//   ->  Auto Voice, speech mode (leveler, de-ess, tone, compression)  ->  warmth  ->  loudness normalise to a LUFS target
+//   ->  look-ahead true-peak limiter
 //
 // Everything is streamed in chunks: the source is read through a ReadFn, intermediate results go through a Store (RAM
 // for the in-memory helpers, a temporary file for the plug-in), so memory use does not depend on the file length.
@@ -29,6 +31,12 @@ struct Options
     float targetLufs = -16.f;   // -24 .. -12   (-16 = stereo podcast standard, -19 = mono podcast standard)
     float ceilingDb = -1.f;     // true-peak ceiling
     bool  mono = false;         // fold to mono (output is a one-channel file)
+    float lowCutHz = 0.f;       // 0 = off, otherwise a steep (24 dB/oct) high-pass: wind and handling rumble
+    float echo = 0.f;           // 0..1  room echo / reverb reduction
+    float warmth = 0.f;         // 0..1  gentle saturation (0 = off)
+    bool  speakers = true;      // per-voice EQ and level balance when the file has two or more voices
+    float spkBalance = 0.7f;    // 0..1  how far the voices are brought to a common level
+    int   speakerRequest = 0;   // 0 = find the number of voices automatically, 1..4 = exactly that many (not used by the chain itself)
 };
 
 struct Stats
@@ -100,10 +108,13 @@ struct Analysis
     Stats stats;
     ClipInfo clip[2];
     NoiseProfile noise;
+    SpeakerMap speakers;         // who speaks when (see Speakers.h)
     std::vector<float> waveform; // min,max pairs
 };
 
 // ---- whole-file stages
+// finds the voices of a one-track recording (called by analyse; public so it can be re-run and tested on its own)
+void detectSpeakers (const ReadFn& src, long long len, double sr, double noiseFloorDb, const NoiseProfile& np, const Progress& prog, SpeakerMap& out);
 Analysis analyse (const ReadFn& src, long long len, double sr, const Progress& prog);
 void scanClipping (const ReadFn& src, long long len, const Progress& prog, ClipInfo out[2]);
 // `dual` = the two channels are different (a true stereo source that is not folded to mono)
@@ -117,7 +128,7 @@ bool processStream (const ReadFn& src, long long len, double sr, bool dual, cons
 class LiveChain
 {
 public:
-    LiveChain (std::shared_ptr<const Analysis> analysis, const Options& o, double sampleRate, bool dualSource, double initialGainDb);
+    LiveChain (std::shared_ptr<const Analysis> analysis, const Options& o, double sampleRate, bool dualSource, double initialGainDb, long long startPos = 0);
     ~LiveChain();
     void push (const float* l, const float* r, int n, std::vector<float>& outL, std::vector<float>& outR);
     double gainDb() const;

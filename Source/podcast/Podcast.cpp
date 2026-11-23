@@ -390,7 +390,7 @@ std::vector<float> sineWindow()
 class StftDenoiser
 {
 public:
-    StftDenoiser (const NoiseProfile& np, float amount, bool stereoIn, bool& easedOut)
+    StftDenoiser (const NoiseProfile& np, float amount, bool stereoIn, bool& easedOut, float echoAmount = 0.f)
         : fft (kFftOrder), win (sineWindow()), stereo (stereoIn)
     {
         easedOut = false;
@@ -402,11 +402,15 @@ public:
             easedOut = true;
             amt *= (float) std::clamp ((np.contrastDb - 6.0) / 8.0, 0.0, 1.0);
         }
-        on = np.valid && amt >= 0.01f && (int) np.psd.size() == kB;
+        const bool noiseOn = np.valid && amt >= 0.01f && (int) np.psd.size() == kB;
+        gammaLate = 0.55 * (double) std::clamp (echoAmount, 0.f, 1.f);
+        on = noiseOn || gammaLate > 0.005;
         if (! on) return;
-        psd = np.psd;
+        if (noiseOn) psd = np.psd; else psd.assign ((size_t) kB, 0.0);
+        if (! noiseOn) amt = 0.f;
         over = 1.0 + 1.2 * (double) amt;                                                  // how much noise we assume is there (1x .. 2.2x)
-        floorG = (float) std::pow (10.0, -(5.0 + 20.0 * (double) amt) / 20.0);            // max reduction 5 .. 25 dB
+        floorG = (float) std::pow (10.0, -(5.0 + 20.0 * std::max ((double) amt, 0.55 * (double) echoAmount)) / 20.0);   // max reduction 5 .. 25 dB
+        ypPast.assign ((size_t) (kLateD + 1) * kB, 0.f); ypPrev.assign ((size_t) kB, 0.f);
         frL.assign ((size_t) kN, 0.f); frR.assign ((size_t) kN, 0.f);
         accL.assign ((size_t) kN, 0.f); accR.assign ((size_t) kN, 0.f);
         fx.assign ((size_t) 2 * kN, 0.f); fy.assign ((size_t) 2 * kN, 0.f);
@@ -456,7 +460,13 @@ private:
         {
             double re = fx[(size_t) 2 * b], im = fx[(size_t) 2 * b + 1];
             if (stereo) { re = 0.5 * (re + fy[(size_t) 2 * b]); im = 0.5 * (im + fy[(size_t) 2 * b + 1]); }
-            const double pn = psd[(size_t) b] * over + 1.0e-14;
+            // late reverberation: what the room is still ringing with from about 40 ms ago (an exponential tail of the earlier signal)
+            const float yp = (float) (re * re + im * im);
+            const float ypSm = 0.5f * (yp + ypPrev[(size_t) b]);
+            ypPrev[(size_t) b] = yp;
+            const double late = gammaLate > 0.0 ? gammaLate * (double) ypPast[(size_t) ((lateHead + 1) % (kLateD + 1)) * kB + (size_t) b] : 0.0;
+            ypPast[(size_t) lateHead * kB + (size_t) b] = ypSm;
+            const double pn = psd[(size_t) b] * over + late + 1.0e-14;
             const double gam = (re * re + im * im) / pn;
             const double xi = beta * (double) gPrev[(size_t) b] * (double) gPrev[(size_t) b] * gamPrev[(size_t) b] + (1.0 - beta) * std::max (gam - 1.0, 0.0);
             const double g = xi / (1.0 + xi);
@@ -464,6 +474,7 @@ private:
             gamPrev[(size_t) b] = gam;
             gPre[(size_t) b] = (float) g;
         }
+        lateHead = (lateHead + 1) % (kLateD + 1);
         for (int b = 0; b < kB; ++b)
         {
             const float a0 = gPre[(size_t) std::max (0, b - 1)], a1 = gPre[(size_t) b], a2 = gPre[(size_t) std::min (kB - 1, b + 1)];
@@ -501,12 +512,68 @@ private:
     std::vector<float> win;
     bool stereo, on = false;
     std::vector<double> psd;
-    double over = 1.0, beta = 0.97;
+    double over = 1.0, beta = 0.97, gammaLate = 0.0;
+    static constexpr int kLateD = 4;
+    std::vector<float> ypPast, ypPrev;
+    int lateHead = 0;
     float floorG = 0.1f;
     std::vector<float> frL, frR, accL, accR, fx, fy, gPrev, gSm, gPre;
     std::vector<double> gamPrev;
     int fill = 0, skip = 0;
     long long inCount = 0, emitted = 0;
+};
+
+// ---------------------------------------------------------------------------------------------------------------
+// Low cut: a 24 dB/oct high-pass for wind and handling rumble (below the voice, so it takes nothing from it)
+struct LowCut
+{
+    Biquad f[2][2];
+    bool on = false;
+    void prepare (double sr, float hz)
+    {
+        on = hz >= 20.f;
+        if (! on) return;
+        const double fc = std::min ((double) hz, sr * 0.2);
+        f[0][0].c = f[1][0].c = Coeffs::make (FilterType::HighPass, sr, fc, 0.0, 0.5412);
+        f[0][1].c = f[1][1].c = Coeffs::make (FilterType::HighPass, sr, fc, 0.0, 1.3066);
+    }
+    void process (float* l, float* r, size_t n)
+    {
+        if (! on) return;
+        for (size_t i = 0; i < n; ++i)
+        {
+            l[i] = f[0][1].tick (f[0][0].tick (l[i]));
+            r[i] = f[1][1].tick (f[1][0].tick (r[i]));
+        }
+    }
+};
+
+// Warmth: a soft, slightly asymmetric tanh curve mixed in (adds a little even and odd harmonics, rounds the peaks). Off at 0.
+struct Warmth
+{
+    double amt = 0.0, drive = 1.0, bias = 0.0, norm = 1.0, dcA = 0.0, dcL = 0.0, dcR = 0.0;
+    void prepare (double sr, float a)
+    {
+        amt = std::clamp ((double) a, 0.0, 1.0);
+        drive = 1.0 + 2.5 * amt; bias = 0.12 * amt;
+        norm = 1.0 / (drive * (1.0 - std::tanh (bias) * std::tanh (bias)));
+        dcA = 1.0 - std::exp (-2.0 * kPiD * 15.0 / sr);
+        dcL = dcR = 0.0;
+    }
+    bool on() const { return amt > 0.005; }
+    void process (float* l, float* r, size_t n)
+    {
+        if (! on()) return;
+        const double tb = std::tanh (bias);
+        for (size_t i = 0; i < n; ++i)
+        {
+            const double xl = l[i], xr = r[i];
+            double yl = (std::tanh (drive * xl + bias) - tb) * norm, yr = (std::tanh (drive * xr + bias) - tb) * norm;
+            yl = xl + amt * (yl - xl); yr = xr + amt * (yr - xr);
+            dcL += dcA * (yl - dcL); dcR += dcA * (yr - dcR);
+            l[i] = (float) (yl - dcL); r[i] = (float) (yr - dcR);
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -611,7 +678,7 @@ Analysis analyse (const ReadFn& src, long long len, double sr, const Progress& p
     // ---- pass 1: loudness, true peak, background level, clip levels, frame energies, waveform
     for (long long pos = 0; pos < len; pos += C)
     {
-        if (prog && ! prog (0.5f * (float) pos / (float) len)) return a;
+        if (prog && ! prog (0.28f * (float) pos / (float) len)) return a;
         const int n = (int) std::min<long long> (C, len - pos);
         if (! src (l.data(), r.data(), pos, n)) return a;
         acc.push (l.data(), r.data(), n);
@@ -664,7 +731,7 @@ Analysis analyse (const ReadFn& src, long long len, double sr, const Progress& p
     long long histStart = 0, nextK = 3, used = 0;
     for (long long pos = 0; pos < len; pos += C)
     {
-        if (prog && ! prog (0.5f + 0.5f * (float) pos / (float) len)) return a;
+        if (prog && ! prog (0.28f + 0.27f * (float) pos / (float) len)) return a;
         const int n = (int) std::min<long long> (C, len - pos);
         if (! src (l.data(), r.data(), pos, n)) return a;
         rp[0].push (l.data(), n); rn[0].push (l.data(), n);
@@ -704,6 +771,9 @@ Analysis analyse (const ReadFn& src, long long len, double sr, const Progress& p
         a.noise.psd = std::move (psd);
         a.noise.valid = true;
     }
+    // ---- pass 3: who is speaking (a failure here only means "no per-voice processing", never a failed analysis)
+    detectSpeakers (src, len, sr, a.stats.noiseFloorDb, a.noise,
+                    [&] (float x) { return ! prog || prog (0.55f + 0.45f * x); }, a.speakers);
     a.valid = true;
     return a;
 }
@@ -722,11 +792,23 @@ bool processStream (const ReadFn& src, long long len, double sr, bool dual, cons
     ClipInfo off; DeclipStream dcL (doDeclip ? a.clip[0] : off), dcR (doDeclip && dual ? a.clip[1] : off);
     bool eased = false;
     const bool stereoDn = dual && ! o.mono;
-    StftDenoiser dn (a.noise, o.denoise, stereoDn, eased);
+    StftDenoiser dn (a.noise, o.denoise, stereoDn, eased, o.echo);
     AutoVoice av; av.prepare (sr);
+    // per-voice EQ and balance (replaces the single adaptive EQ when the file has two or more voices)
+    SpeakerEq spk;
+    bool spkActive = false;
+    if (o.speakers && a.speakers.valid && a.speakers.count >= 2)
+    {
+        const auto plan = makeSpeakerPlan (a.speakers, o.tone, o.spkBalance);
+        spkActive = plan.active;
+        if (spkActive) { spk.prepare (sr, stereoDn); spk.setPlan (plan); }
+    }
+    LowCut lc; lc.prepare (sr, o.lowCutHz);
+    Warmth wm; wm.prepare (sr, o.warmth);
+    long long emitPos = 0;
     VoxSettings vs;
     vs.on = true; vs.mode = VoxSpeech;
-    vs.level = o.level; vs.tone = o.tone; vs.deess = o.deess; vs.comp = o.comp;
+    vs.level = o.level; vs.tone = spkActive ? 0.f : o.tone; vs.deess = o.deess; vs.comp = o.comp;
     vs.clean = 0.25f * o.denoise; vs.targetDb = -20.f;
     LoudnessMeter lm; lm.prepare (sr);
 
@@ -745,6 +827,7 @@ bool processStream (const ReadFn& src, long long len, double sr, bool dual, cons
         else { dL.assign (l.begin(), l.begin() + n); dR.assign (r.begin(), r.begin() + n); }
         // 2. fold to mono
         if (o.mono && dual) for (size_t i = 0; i < dL.size(); ++i) { const float m = 0.5f * (dL[i] + dR[i]); dL[i] = dR[i] = m; }
+        lc.process (dL.data(), dR.data(), dL.size());
         // 3. denoise
         if (dn.active())
         {
@@ -753,6 +836,8 @@ bool processStream (const ReadFn& src, long long len, double sr, bool dual, cons
             if (last) dn.finish (eL, eR);
         }
         else { eL = dL; eR = dR; }
+        if (spkActive && ! eL.empty()) spk.process (a.speakers, eL.data(), eR.data(), (int) eL.size(), emitPos);
+        emitPos += (long long) eL.size();
         // 4. Auto Voice, speech mode
         // (Auto Voice applies its tone EQ per call with the settings it holds at the end of the call, so it has to be fed in short pieces,
         //  like a plug-in host would: long pieces make the EQ jump at every piece boundary, which is an audible click.)
@@ -761,6 +846,7 @@ bool processStream (const ReadFn& src, long long len, double sr, bool dual, cons
             const int k = (int) std::min<size_t> (32, eL.size() - off2);
             av.process (eL.data() + off2, eR.data() + off2, k, vs);
         }
+        wm.process (eL.data(), eR.data(), eL.size());
         if (! eL.empty()) { lm.push (eL.data(), eR.data(), (int) eL.size()); pre.append (eL.data(), eR.data(), (int) eL.size()); }
     };
 
@@ -827,6 +913,11 @@ struct LiveChain::Impl
     bool eased = false;
     StftDenoiser dn;
     AutoVoice av;
+    SpeakerEq spk;
+    bool spkActive = false;
+    LowCut lc;
+    Warmth wm;
+    long long emitPos = 0;
     VoxSettings vs;
     LoudnessMeter lm;
     LookaheadLimiter lim;
@@ -835,17 +926,26 @@ struct LiveChain::Impl
     long long heard = 0;
     std::vector<float> l, r, dL, dR, eL, eR;
 
-    Impl (std::shared_ptr<const Analysis> a, const Options& opt, double rate, bool dualSource, double g0)
+    Impl (std::shared_ptr<const Analysis> a, const Options& opt, double rate, bool dualSource, double g0, long long startPos)
         : an (std::move (a)), o (opt), sr (rate), dual (dualSource),
           doDeclip (opt.declip && an != nullptr && (an->clip[0].on || (dualSource && an->clip[1].on))),
           stereoDn (dualSource && ! opt.mono),
           dcL (doDeclip ? an->clip[0] : off), dcR (doDeclip && dualSource ? an->clip[1] : off),
-          dn (an->noise, opt.denoise, dualSource && ! opt.mono, eased),
+          dn (an->noise, opt.denoise, dualSource && ! opt.mono, eased, opt.echo),
           gainDb (g0), gainLin (std::pow (10.0, g0 / 20.0))
     {
+        emitPos = startPos;
         av.prepare (sr);
+        if (o.speakers && an->speakers.valid && an->speakers.count >= 2)
+        {
+            const auto plan = makeSpeakerPlan (an->speakers, o.tone, o.spkBalance);
+            spkActive = plan.active;
+            if (spkActive) { spk.prepare (sr, stereoDn); spk.setPlan (plan); }
+        }
+        lc.prepare (sr, o.lowCutHz);
+        wm.prepare (sr, o.warmth);
         vs.on = true; vs.mode = VoxSpeech;
-        vs.level = o.level; vs.tone = o.tone; vs.deess = o.deess; vs.comp = o.comp;
+        vs.level = o.level; vs.tone = spkActive ? 0.f : o.tone; vs.deess = o.deess; vs.comp = o.comp;
         vs.clean = 0.25f * o.denoise; vs.targetDb = -20.f;
         lm.prepare (sr);
         lim.prepare (sr);
@@ -853,8 +953,8 @@ struct LiveChain::Impl
     }
 };
 
-LiveChain::LiveChain (std::shared_ptr<const Analysis> a, const Options& o, double sampleRate, bool dualSource, double initialGainDb)
-    : p (std::make_unique<Impl> (std::move (a), o, sampleRate, dualSource, initialGainDb)) {}
+LiveChain::LiveChain (std::shared_ptr<const Analysis> a, const Options& o, double sampleRate, bool dualSource, double initialGainDb, long long startPos)
+    : p (std::make_unique<Impl> (std::move (a), o, sampleRate, dualSource, initialGainDb, startPos)) {}
 LiveChain::~LiveChain() = default;
 double LiveChain::gainDb() const { return p->gainDb; }
 const Options& LiveChain::options() const { return p->o; }
@@ -874,6 +974,7 @@ void LiveChain::push (const float* inL, const float* inR, int n, std::vector<flo
     else { s.dL.assign (inL, inL + n); s.dR.assign (s.dual ? inR : inL, (s.dual ? inR : inL) + n); }
     // 2. mono fold
     if (s.o.mono && s.dual) for (size_t i = 0; i < s.dL.size(); ++i) { const float m = 0.5f * (s.dL[i] + s.dR[i]); s.dL[i] = s.dR[i] = m; }
+    s.lc.process (s.dL.data(), s.dR.data(), s.dL.size());
     // 3. denoise
     if (s.dn.active())
     {
@@ -882,9 +983,12 @@ void LiveChain::push (const float* inL, const float* inR, int n, std::vector<flo
     }
     else { s.eL = s.dL; s.eR = s.dR; }
     if (s.eL.empty()) return;
+    if (s.spkActive) s.spk.process (s.an->speakers, s.eL.data(), s.eR.data(), (int) s.eL.size(), s.emitPos);
+    s.emitPos += (long long) s.eL.size();
     // 4. Auto Voice (short pieces, see processStream)
     for (size_t off2 = 0; off2 < s.eL.size(); off2 += 32)
         s.av.process (s.eL.data() + off2, s.eR.data() + off2, (int) std::min<size_t> (32, s.eL.size() - off2), s.vs);
+    s.wm.process (s.eL.data(), s.eR.data(), s.eL.size());
     const int m = (int) s.eL.size();
     s.lm.push (s.eL.data(), s.eR.data(), m);
     // 5. gain: follows what the loudness meter has heard (after the first few seconds), a couple of dB per second at most

@@ -1578,6 +1578,12 @@ aio::podcast::Options AIOProcessor::readPodcastOptions() const
     o.targetLufs = f ("pcTarget");
     o.ceilingDb = f ("pcCeil");
     o.mono = f ("pcMono") > 0.5f;
+    o.lowCutHz = f ("pcLowCut");
+    o.echo = f ("pcEcho") * 0.01f;
+    o.warmth = f ("pcWarmth") * 0.01f;
+    o.speakers = f ("pcSpkOn") > 0.5f;
+    o.spkBalance = f ("pcSpkBal") * 0.01f;
+    o.speakerRequest = (int) std::lround (f ("pcSpkCount"));
     return o;
 }
 
@@ -1591,19 +1597,22 @@ void AIOProcessor::exportPodcast (const juce::File& out, int bitDepth) { podcast
 
 namespace
 {
-struct PodPreset { const char* name; float target, ceil, denoise, level, tone, deess, comp; bool mono; };
+struct PodPreset { const char* name; float target, ceil, denoise, level, tone, deess, comp; bool mono; float lowCut, echo, warmth; };
 const PodPreset* podPresets()
 {
     static const PodPreset p[] = {
-        { "Podcast (stereo, -16)",     -16.f, -1.f, 55.f, 100.f, 70.f, 60.f, 70.f, false },
-        { "Podcast (mono, -19)",       -19.f, -1.f, 55.f, 100.f, 70.f, 60.f, 70.f, true  },
-        { "Video voice-over (-14)",    -14.f, -1.f, 55.f, 100.f, 70.f, 60.f, 80.f, false },
-        { "Noisy room / interview",    -16.f, -1.f, 85.f, 100.f, 60.f, 65.f, 75.f, false },
-        { "Audiobook (ACX-style)",     -20.f, -3.f, 70.f, 90.f,  60.f, 60.f, 60.f, true  },
-        { "Gentle (keep it natural)",  -16.f, -1.f, 30.f, 60.f,  40.f, 40.f, 45.f, false } };
+        { "Podcast (stereo, -16)",     -16.f, -1.f, 55.f, 100.f, 70.f, 60.f, 70.f, false, 0.f,   0.f,  0.f },
+        { "Podcast (mono, -19)",       -19.f, -1.f, 55.f, 100.f, 70.f, 60.f, 70.f, true,  0.f,   0.f,  0.f },
+        { "Video voice-over (-14)",    -14.f, -1.f, 55.f, 100.f, 70.f, 60.f, 80.f, false, 0.f,   0.f,  0.f },
+        { "Noisy room / interview",    -16.f, -1.f, 85.f, 100.f, 60.f, 65.f, 75.f, false, 80.f,  25.f, 0.f },
+        { "Audiobook (ACX-style)",     -20.f, -3.f, 70.f, 90.f,  60.f, 60.f, 60.f, true,  0.f,   0.f,  0.f },
+        { "Gentle (keep it natural)",  -16.f, -1.f, 30.f, 60.f,  40.f, 40.f, 45.f, false, 0.f,   0.f,  0.f },
+        { "Wedding: lav vows (mono)",           -16.f, -1.f, 35.f, 90.f,  60.f, 70.f, 70.f, true,  90.f,  10.f, 0.f },
+        { "Wedding: room-mic speeches",         -16.f, -1.f, 50.f, 100.f, 70.f, 50.f, 80.f, false, 100.f, 60.f, 0.f },
+        { "Wedding: noisy / outdoor ceremony",  -16.f, -1.f, 75.f, 100.f, 70.f, 60.f, 80.f, true,  140.f, 35.f, 0.f } };
     return p;
 }
-constexpr int kPodPresets = 6;
+constexpr int kPodPresets = 9;
 }
 
 int AIOProcessor::podcastPresetCount() { return kPodPresets; }
@@ -1615,4 +1624,6 @@ void AIOProcessor::applyPodcastPreset (int index)
     setParam ("pcTarget", p.target); setParam ("pcCeil", p.ceil); setParam ("pcDenoise", p.denoise);
     setParam ("pcLevel", p.level); setParam ("pcTone", p.tone); setParam ("pcDeEss", p.deess); setParam ("pcComp", p.comp);
     setParam ("pcMono", p.mono ? 1.f : 0.f); setParam ("pcDeclip", 1.f);
+    setParam ("pcLowCut", p.lowCut); setParam ("pcEcho", p.echo); setParam ("pcWarmth", p.warmth);
+    setParam ("pcSpkOn", 1.f);
 }

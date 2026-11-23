@@ -18,7 +18,10 @@ class FileStore;
 class PodcastSession
 {
 public:
-    enum State { Idle = 0, Loading, Processing, Exporting, Failed };
+    enum State { Idle = 0, Loading, Processing, Exporting, Failed, Batching };
+
+    struct Voice { float f0 = 0.f, seconds = 0.f, levelDb = -100.f; };
+    struct Segment { double t0 = 0.0, t1 = 0.0; int voice = 0; };         // normalised 0..1 of the file
 
     struct Info
     {
@@ -30,6 +33,21 @@ public:
         podcast::Report report;
         podcast::Options used;
         std::vector<float> waveform, waveformAfter;     // min,max pairs
+        // who speaks when
+        int voiceCount = 0, voiceRequest = 0;           // voices found (0 = none detected), the count asked for (0 = automatic)
+        float voiceSeparation = 0.f;                    // how distinct the voices are (0..1)
+        std::vector<Voice> voices;
+        std::vector<Segment> segments;
+        bool resultStale = false;                       // the voices were edited after the last run
+        bool decoded = false;                           // the audio was taken out of a video / compressed file
+    };
+
+    struct BatchStatus
+    {
+        int total = 0, done = 0, failed = 0;
+        juce::String current;
+        juce::StringArray log;                          // one line per finished file
+        bool finished = false;
     };
 
     static constexpr double kMaxSeconds = 4.0 * 3600.0;
@@ -46,11 +64,20 @@ public:
     void exportFile (const juce::File& out, int bitDepth);      // 16 / 24 (WAV or FLAC by extension) / 32 (WAV float)
     void cancel();
     State state() const { return (State) stateV.load(); }
-    bool  busy() const { const auto s = state(); return s == Loading || s == Processing || s == Exporting; }
+    bool  busy() const { const auto s = state(); return s == Loading || s == Processing || s == Exporting || s == Batching; }
     float progress() const { return progressV.load(); }
     juce::String message() const;
     Info info() const;
     bool takeExportDone (juce::String& msg);
+
+    // ---- voices (message thread, not while busy). 0 = find the number of voices automatically, 1 = treat it as one voice, 2..4 = exactly that many.
+    void setSpeakerCount (int requested);
+    // moves the speech chunk at this point of the file (0..1) to the next (dir = +1) or previous (-1) voice
+    void cycleSpeakerAt (double normalisedPos, int dir);
+
+    // ---- batch: every file in the list gets the same settings and lands in outDir as "<name> - podcast ready.wav|flac"
+    void runBatch (const std::vector<juce::File>& files, const juce::File& outDir, const podcast::Options& o, int bitDepth, bool flac);
+    BatchStatus batchStatus() const;
 
     // ---- playback (audio thread safe)
     void prepare (double hostSampleRate);
@@ -88,8 +115,12 @@ private:
     Info infoV;
     juce::String msg, exportMsg;
     bool exportDone = false;
+    BatchStatus batchV;
+    void clearSourceTemp();
+    void fillVoiceInfo (Info& in, const podcast::Analysis& a) const;
+    void applySpeakerEdit (const std::function<void (podcast::SpeakerMap&)>& edit);
 
-    juce::File sourceFile, tempDir;
+    juce::File sourceFile, tempDir, srcTempDir;     // srcTempDir holds the decoded audio of a video file for as long as it is loaded
     std::shared_ptr<podcast::Analysis> analysis;
     bool sourceDual = false;
     std::shared_ptr<FileStore> finalStore;

@@ -1,4 +1,5 @@
 #include "PodcastSession.h"
+#include "MediaDecode.h"
 #include <random>
 #include <cmath>
 #include <algorithm>
@@ -166,6 +167,7 @@ public:
     {
         optV[0].store (o.declip ? 1.f : 0.f); optV[1].store (o.denoise); optV[2].store (o.level); optV[3].store (o.tone);
         optV[4].store (o.deess); optV[5].store (o.comp); optV[6].store (o.targetLufs); optV[7].store (o.ceilingDb); optV[8].store (o.mono ? 1.f : 0.f);
+        optV[9].store (o.lowCutHz); optV[10].store (o.echo); optV[11].store (o.warmth); optV[12].store (o.speakers ? 1.f : 0.f); optV[13].store (o.spkBalance);
         optsSet.store (true);
     }
 
@@ -269,7 +271,7 @@ private:
         std::vector<float> oL, oR, bl, br;
 
         LiveStream (std::shared_ptr<const podcast::Analysis> a, const podcast::Options& o, double sr, bool dual, double gain0, long long from, long long len, SourceReader* rd)
-            : chain (std::move (a), o, sr, dual, gain0), opts (o), inPos (from), outStart (from), srcLen (len), reader (rd) { bl.resize (2048); br.resize (2048); }
+            : chain (std::move (a), o, sr, dual, gain0, from), opts (o), inPos (from), outStart (from), srcLen (len), reader (rd) { bl.resize (2048); br.resize (2048); }
 
         void ensure (long long upTo)
         {
@@ -306,12 +308,15 @@ private:
         podcast::Options o;
         o.declip = optV[0].load() > 0.5f; o.denoise = optV[1].load(); o.level = optV[2].load(); o.tone = optV[3].load();
         o.deess = optV[4].load(); o.comp = optV[5].load(); o.targetLufs = optV[6].load(); o.ceilingDb = optV[7].load(); o.mono = optV[8].load() > 0.5f;
+        o.lowCutHz = optV[9].load(); o.echo = optV[10].load(); o.warmth = optV[11].load(); o.speakers = optV[12].load() > 0.5f; o.spkBalance = optV[13].load();
         return o;
     }
     static bool same (const podcast::Options& a, const podcast::Options& b)
     {
         return a.declip == b.declip && a.mono == b.mono && std::abs (a.denoise - b.denoise) < 1e-4f && std::abs (a.level - b.level) < 1e-4f && std::abs (a.tone - b.tone) < 1e-4f
-            && std::abs (a.deess - b.deess) < 1e-4f && std::abs (a.comp - b.comp) < 1e-4f && std::abs (a.targetLufs - b.targetLufs) < 1e-3f && std::abs (a.ceilingDb - b.ceilingDb) < 1e-3f;
+            && std::abs (a.deess - b.deess) < 1e-4f && std::abs (a.comp - b.comp) < 1e-4f && std::abs (a.targetLufs - b.targetLufs) < 1e-3f && std::abs (a.ceilingDb - b.ceilingDb) < 1e-3f
+            && std::abs (a.lowCutHz - b.lowCutHz) < 0.5f && std::abs (a.echo - b.echo) < 1e-4f && std::abs (a.warmth - b.warmth) < 1e-4f
+            && a.speakers == b.speakers && std::abs (a.spkBalance - b.spkBalance) < 1e-4f;
     }
 
     void run() override
@@ -521,7 +526,7 @@ private:
     std::atomic<double> posA { 0.0 }, hostSrA { 44100.0 };
     std::atomic<bool> hasProcFile { false }, hasAnalysis { false }, liveWanted { true }, optsSet { false };
     std::atomic<float> liveGainA { 0.f };
-    std::atomic<float> optV[9];
+    std::atomic<float> optV[14];
     // (audio thread only)
     int slotOff = 0;
     long long lastPlayed = 0;
@@ -544,6 +549,47 @@ private:
     std::function<void()> fn;
 };
 
+// Writes the processed audio to its final WAV / FLAC (16-bit gets dither). Returns false on cancel (cancelled = true) or error (err set).
+static bool writeStoreToFile (FileStore& store, const juce::File& out, double sampleRate, int bitDepth,
+                              const std::function<bool (float)>& prog, juce::String& err, bool& cancelled)
+{
+    cancelled = false;
+    const bool flac = out.hasFileExtension ("flac");
+    const int depth = flac ? std::min (bitDepth, 24) : bitDepth;
+    const int outCh = store.numChannels();
+
+    out.deleteFile();
+    auto stream = out.createOutputStream();
+    if (stream == nullptr) { err = "Couldn't write to " + out.getFullPathName(); return false; }
+    std::unique_ptr<juce::AudioFormatWriter> writer;
+    if (flac) { juce::FlacAudioFormat f; writer.reset (f.createWriterFor (stream.get(), sampleRate, (unsigned) outCh, depth, {}, 5)); }
+    else      { juce::WavAudioFormat f;  writer.reset (f.createWriterFor (stream.get(), sampleRate, (unsigned) outCh, depth, {}, 0)); }
+    if (writer == nullptr) { err = "Couldn't create the output file writer."; return false; }
+    stream.release();
+
+    std::mt19937 rng (4321);
+    std::uniform_real_distribution<float> u (-0.5f, 0.5f);
+    const long long n = store.length();
+    constexpr int chunk = 1 << 15;
+    std::vector<float> d0 ((size_t) chunk), d1 ((size_t) chunk);
+    for (long long pos = 0; pos < n; pos += chunk)
+    {
+        if (prog && ! prog ((float) pos / (float) n)) { writer.reset(); out.deleteFile(); cancelled = true; return false; }
+        const int m = (int) std::min<long long> (chunk, n - pos);
+        if (! store.read (d0.data(), d1.data(), pos, m)) { writer.reset(); out.deleteFile(); err = "Couldn't read the processed audio back from disk."; return false; }
+        if (depth == 16)
+        {
+            const float lsb = 1.f / 32768.f;
+            for (int i = 0; i < m; ++i) { d0[(size_t) i] += (u (rng) + u (rng)) * lsb; d1[(size_t) i] += (u (rng) + u (rng)) * lsb; }
+        }
+        for (int i = 0; i < m; ++i) { d0[(size_t) i] = std::clamp (d0[(size_t) i], -1.f, 1.f); d1[(size_t) i] = std::clamp (d1[(size_t) i], -1.f, 1.f); }
+        const float* ch[2] = { d0.data(), d1.data() };
+        if (! writer->writeFromFloatArrays (ch, outCh, m)) { writer.reset(); out.deleteFile(); err = "Couldn't write the file (disk full?)."; return false; }
+    }
+    writer.reset();
+    return true;
+}
+
 PodcastSession::PodcastSession()
 {
     formats.registerBasicFormats();
@@ -562,6 +608,25 @@ PodcastSession::~PodcastSession()
     player.reset();
     finalStore.reset();
     clearTemp();
+    clearSourceTemp();
+}
+
+void PodcastSession::clearSourceTemp()
+{
+    if (srcTempDir != juce::File() && srcTempDir.exists()) srcTempDir.deleteRecursively();
+    srcTempDir = juce::File();
+}
+
+void PodcastSession::fillVoiceInfo (Info& in, const podcast::Analysis& a) const
+{
+    const auto& m = a.speakers;
+    in.voices.clear(); in.segments.clear();
+    in.voiceCount = (m.valid && ! m.chunks.empty()) ? m.count : 0;
+    in.voiceRequest = m.requested; in.voiceSeparation = m.separation;
+    if (in.voiceCount == 0 || a.length <= 0) return;
+    for (int s = 0; s < m.count; ++s) in.voices.push_back ({ m.speaker[(size_t) s].f0, m.speaker[(size_t) s].seconds, m.speaker[(size_t) s].levelDb });
+    for (size_t i = 0; i < m.chunks.size(); ++i)
+        in.segments.push_back ({ (double) m.chunks[i].a / (double) a.length, (double) m.chunks[i].b / (double) a.length, m.label[i] });
 }
 
 void PodcastSession::clearTemp()
@@ -606,9 +671,27 @@ void PodcastSession::loadFile (const juce::File& file)
         player->setSources ({}, {}, 0.0, 0, nullptr, false);
         finalStore.reset();
         clearTemp();
+        clearSourceTemp();
+
+        // video files and compressed containers: take the audio out into a temporary WAV first (the preview and processing jump around in the file)
+        juce::File readable = file;
+        bool decoded = false;
+        if (media::needsDecode (file))
+        {
+            setMessage ("Reading the audio out of " + file.getFileName() + "...");
+            srcTempDir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("AIOStudioPodcast_src_" + juce::String (juce::Time::currentTimeMillis()));
+            if (! srcTempDir.createDirectory().wasOk()) { clearSourceTemp(); fail ("Couldn't create a temporary folder."); return; }
+            juce::String err;
+            const bool ok = media::decodeToWav (file, srcTempDir.getChildFile ("source.wav"), formats,
+                                                [this] (float x) { progressV.store (0.3f * x); return ! cancelFlag.load(); }, err);
+            if (cancelFlag.load()) { clearSourceTemp(); stateV.store (Idle); return; }
+            if (! ok) { clearSourceTemp(); fail (err.isNotEmpty() ? err : "Couldn't read the audio from that file."); return; }
+            readable = srcTempDir.getChildFile ("source.wav");
+            decoded = true;
+        }
 
         SourceReader sr;
-        sr.rd.reset (formats.createReaderFor (file));
+        sr.rd.reset (formats.createReaderFor (readable));
         if (sr.rd == nullptr) { fail ("Couldn't read that file (unsupported or damaged)."); return; }
         const long long len = sr.rd->lengthInSamples;
         const double rate = sr.rd->sampleRate;
@@ -621,21 +704,25 @@ void PodcastSession::loadFile (const juce::File& file)
                                                                        len, rate, [this] (float x) { progressV.store (x); return ! cancelFlag.load(); }));
         if (cancelFlag.load()) { stateV.store (Idle); return; }
         if (! a->valid) { fail ("That file is silent (or unreadable) - there is nothing to process."); return; }
+        if (getOptions) { const int req = getOptions().speakerRequest; if (req > 0) podcast::clusterSpeakers (a->speakers, req); }
 
         Info in;
         in.hasFile = true; in.name = file.getFileName(); in.sampleRate = rate; in.seconds = (double) len / rate; in.channels = nch;
-        in.before = a->stats; in.waveform = a->waveform;
+        in.before = a->stats; in.waveform = a->waveform; in.decoded = decoded;
+        fillVoiceInfo (in, *a);
         {
             const juce::ScopedLock sl (lockInfo);
             infoV = in; exportDone = false;
         }
-        sourceFile = file; analysis = a; sourceDual = nch > 1;
+        sourceFile = readable; analysis = a; sourceDual = nch > 1;
         player->setHostRate (hostSrCache);
-        player->setSources (file, {}, rate, len, a, nch > 1);
+        player->setSources (readable, {}, rate, len, a, nch > 1);
         if (getOptions) setLiveOptions (getOptions());
         beforeLufs.store ((float) a->stats.lufs); beforePeak.store ((float) a->stats.truePeakDb);
         refreshMatchGain();
-        setMessage (juce::String::formatted ("Loaded %s  -  %.1f LUFS, true peak %.1f dB", file.getFileName().toRawUTF8(), a->stats.lufs, a->stats.truePeakDb));
+        juce::String loaded = juce::String::formatted ("Loaded %s  -  %.1f LUFS, true peak %.1f dB", file.getFileName().toRawUTF8(), a->stats.lufs, a->stats.truePeakDb);
+        if (in.voiceCount >= 2) loaded << juce::String::formatted ("  -  %d voices found", in.voiceCount);
+        setMessage (loaded);
         progressV.store (1.f);
         stateV.store (Idle);
         if (onWake) onWake();
@@ -661,7 +748,7 @@ void PodcastSession::run (const podcast::Options& o)
         clearTemp();
         {
             const juce::ScopedLock sl (lockInfo);
-            infoV.hasResult = false; infoV.waveformAfter.clear();
+            infoV.hasResult = false; infoV.waveformAfter.clear(); infoV.resultStale = false;
         }
 
         const int outCh = (in.channels > 1 && ! o.mono) ? 2 : 1;
@@ -698,7 +785,7 @@ void PodcastSession::run (const podcast::Options& o)
         finalStore = out;
         {
             const juce::ScopedLock sl (lockInfo);
-            infoV.hasResult = true; infoV.report = rep; infoV.used = o; infoV.waveformAfter = wf;
+            infoV.hasResult = true; infoV.resultStale = false; infoV.report = rep; infoV.used = o; infoV.waveformAfter = wf;
         }
         double g = rep.after.lufs - in.before.lufs;                       // volume match for A/B: original raised/lowered to the same loudness
         g = std::min (g, -0.5 - in.before.truePeakDb);                    // ...but never into clipping
@@ -728,46 +815,159 @@ void PodcastSession::exportFile (const juce::File& out, int bitDepth)
         auto fail = [this] (const juce::String& m) { setMessage (m); stateV.store (Failed); if (onWake) onWake(); };
         if (store == nullptr || ! in.hasResult) { fail ("Run PODCAST READY first, then export."); return; }
         setMessage ("Writing " + out.getFileName() + "...");
-        const bool flac = out.hasFileExtension ("flac");
-        const int depth = flac ? std::min (bitDepth, 24) : bitDepth;
-        const int outCh = store->numChannels();
-
-        out.deleteFile();
-        auto stream = out.createOutputStream();
-        if (stream == nullptr) { fail ("Couldn't write to " + out.getFullPathName()); return; }
-        std::unique_ptr<juce::AudioFormatWriter> writer;
-        if (flac) { juce::FlacAudioFormat f; writer.reset (f.createWriterFor (stream.get(), in.sampleRate, (unsigned) outCh, depth, {}, 5)); }
-        else      { juce::WavAudioFormat f;  writer.reset (f.createWriterFor (stream.get(), in.sampleRate, (unsigned) outCh, depth, {}, 0)); }
-        if (writer == nullptr) { fail ("Couldn't create the output file writer."); return; }
-        stream.release();
-
-        std::mt19937 rng (4321);
-        std::uniform_real_distribution<float> u (-0.5f, 0.5f);
-        const long long n = store->length();
-        constexpr int chunk = 1 << 15;
-        std::vector<float> d0 ((size_t) chunk), d1 ((size_t) chunk);
-        for (long long pos = 0; pos < n; pos += chunk)
+        juce::String err; bool cancelled = false;
+        if (! writeStoreToFile (*store, out, in.sampleRate, bitDepth, [this] (float x) { progressV.store (x); return ! cancelFlag.load(); }, err, cancelled))
         {
-            if (cancelFlag.load()) { writer.reset(); out.deleteFile(); stateV.store (Idle); return; }
-            const int m = (int) std::min<long long> (chunk, n - pos);
-            if (! store->read (d0.data(), d1.data(), pos, m)) { writer.reset(); out.deleteFile(); fail ("Couldn't read the processed audio back from disk."); return; }
-            if (depth == 16)
-            {
-                const float lsb = 1.f / 32768.f;
-                for (int i = 0; i < m; ++i) { d0[(size_t) i] += (u (rng) + u (rng)) * lsb; d1[(size_t) i] += (u (rng) + u (rng)) * lsb; }
-            }
-            for (int i = 0; i < m; ++i) { d0[(size_t) i] = std::clamp (d0[(size_t) i], -1.f, 1.f); d1[(size_t) i] = std::clamp (d1[(size_t) i], -1.f, 1.f); }
-            const float* ch[2] = { d0.data(), d1.data() };
-            if (! writer->writeFromFloatArrays (ch, outCh, m)) { writer.reset(); out.deleteFile(); fail ("Couldn't write the file (disk full?)."); return; }
-            progressV.store ((float) pos / (float) n);
+            if (cancelled) stateV.store (Idle); else fail (err);
+            return;
         }
-        writer.reset();
         {
             const juce::ScopedLock sl (lockInfo);
             exportDone = true;
             exportMsg = juce::String::formatted ("Saved %s  -  %.1f LUFS, true peak %.1f dB", out.getFileName().toRawUTF8(), in.report.after.lufs, in.report.after.truePeakDb);
         }
         setMessage (exportMsg);
+        progressV.store (1.f);
+        stateV.store (Idle);
+        if (onWake) onWake();
+    });
+}
+
+// ------------------------------------------------------------------------------------------------ voices
+void PodcastSession::applySpeakerEdit (const std::function<void (podcast::SpeakerMap&)>& edit)
+{
+    if (busy() || analysis == nullptr) return;
+    auto a2 = std::make_shared<podcast::Analysis> (*analysis);
+    edit (a2->speakers);
+    analysis = a2;
+    bool hadResult = false;
+    Info in;
+    {
+        const juce::ScopedLock sl (lockInfo);
+        fillVoiceInfo (infoV, *a2);
+        hadResult = infoV.hasResult;
+        if (hadResult) infoV.resultStale = true;
+        in = infoV;
+    }
+    const juce::File proc = (hadResult && finalStore != nullptr) ? finalStore->getFile() : juce::File();
+    player->setSources (sourceFile, proc, in.sampleRate, a2->length, a2, sourceDual);
+    if (hadResult) setMessage ("The voices changed. LIVE already uses them; press MAKE PODCAST READY again so the file you export does too.");
+    if (onWake) onWake();
+}
+
+void PodcastSession::setSpeakerCount (int requested)
+{
+    requested = std::clamp (requested, 0, podcast::kMaxSpeakers);
+    if (analysis == nullptr || (analysis->speakers.requested == requested && ! analysis->speakers.chunks.empty())) return;
+    applySpeakerEdit ([requested] (podcast::SpeakerMap& m) { podcast::clusterSpeakers (m, requested); });
+}
+
+void PodcastSession::cycleSpeakerAt (double normalisedPos, int dir)
+{
+    if (analysis == nullptr || analysis->speakers.count < 2 || analysis->speakers.chunks.empty()) return;
+    applySpeakerEdit ([normalisedPos, dir, len = analysis->length] (podcast::SpeakerMap& m)
+    {
+        const int ci = m.chunkAt ((long long) (std::clamp (normalisedPos, 0.0, 1.0) * (double) len));
+        if (ci < 0) return;
+        const int keep = m.count;
+        m.label[(size_t) ci] = (m.label[(size_t) ci] + (dir >= 0 ? 1 : keep - 1)) % keep;
+        m.rebuild();
+        m.count = std::max (m.count, keep);
+    });
+}
+
+// ------------------------------------------------------------------------------------------------ batch
+PodcastSession::BatchStatus PodcastSession::batchStatus() const { const juce::ScopedLock sl (lockInfo); return batchV; }
+
+void PodcastSession::runBatch (const std::vector<juce::File>& filesIn, const juce::File& outDir, const podcast::Options& o, int bitDepth, bool flac)
+{
+    const auto files = filesIn;
+    startJob (Batching, [this, files, outDir, o, bitDepth, flac]
+    {
+        playing.store (false);
+        resultPlayable.store (false);
+        player->setSources ({}, {}, 0.0, 0, nullptr, false);
+        finalStore.reset();
+        clearTemp(); clearSourceTemp();
+        { const juce::ScopedLock sl (lockInfo); infoV = {}; exportDone = false; batchV = {}; batchV.total = (int) files.size(); }
+        auto fail = [this] (const juce::String& m) { setMessage (m); stateV.store (Failed); if (onWake) onWake(); };
+        if (! outDir.createDirectory().wasOk()) { fail ("Couldn't create the output folder."); return; }
+
+        const int total = (int) files.size();
+        for (int i = 0; i < total; ++i)
+        {
+            const auto& f = files[(size_t) i];
+            auto slice = [this, i, total] (float lo, float hi) { return [this, i, total, lo, hi] (float x) { progressV.store (((float) i + lo + (hi - lo) * x) / (float) total); return ! cancelFlag.load(); }; };
+            { const juce::ScopedLock sl (lockInfo); batchV.current = f.getFileName(); }
+            setMessage (juce::String::formatted ("Batch %d of %d: ", i + 1, total) + f.getFileName());
+
+            juce::String err, resultLine;
+            bool ok = false;
+            const auto work = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("AIOStudioPodcast_batch_" + juce::String (juce::Time::currentTimeMillis()) + "_" + juce::String (i));
+            [&]
+            {
+                if (! work.createDirectory().wasOk()) { err = "couldn't create a temporary folder"; return; }
+                juce::File readable = f;
+                if (media::needsDecode (f))
+                {
+                    if (! media::decodeToWav (f, work.getChildFile ("source.wav"), formats, slice (0.f, 0.1f), err)) { if (err.isEmpty()) err = "couldn't read the audio"; return; }
+                    readable = work.getChildFile ("source.wav");
+                }
+                SourceReader sr;
+                sr.rd.reset (formats.createReaderFor (readable));
+                if (sr.rd == nullptr) { err = "unsupported or damaged file"; return; }
+                const long long len = sr.rd->lengthInSamples;
+                const double rate = sr.rd->sampleRate;
+                const int nch = sr.rd->numChannels >= 2 ? 2 : 1;
+                if (len < 8192 || rate < 8000.0) { err = "too short or unusable sample rate"; return; }
+                if ((double) len / rate > kMaxSeconds) { err = "longer than 4 hours"; return; }
+                const auto rd = [&] (float* l, float* r, long long pos, int n) { return sr.read (l, r, pos, n); };
+                auto a = std::make_shared<podcast::Analysis> (podcast::analyse (rd, len, rate, slice (0.1f, 0.3f)));
+                if (cancelFlag.load()) return;
+                if (! a->valid) { err = "silent or unreadable"; return; }
+                if (o.speakerRequest > 0) podcast::clusterSpeakers (a->speakers, o.speakerRequest);
+
+                const int outCh = (nch > 1 && ! o.mono) ? 2 : 1;
+                const double needBytes = (double) len * outCh * 3.0 * 2.0 * 1.15;
+                const auto freeBytes = work.getBytesFreeOnVolume();
+                if (freeBytes > 0 && (double) freeBytes < needBytes) { err = "not enough free disk space"; return; }
+                auto pre = std::make_unique<FileStore> (work.getChildFile ("pre.wav"), rate, outCh, 0.25f);
+                auto outS = std::make_unique<FileStore> (work.getChildFile ("result.wav"), rate, outCh, 1.f);
+                if (! pre->begin() || ! outS->begin()) { err = "couldn't write temporary files"; return; }
+                podcast::Report rep;
+                if (! podcast::processStream (rd, len, rate, nch > 1, *a, o, *pre, *outS, rep, nullptr, slice (0.3f, 0.85f)))
+                {
+                    if (! cancelFlag.load()) err = "couldn't process (silent, or the disk filled up)";
+                    return;
+                }
+                pre->closeFiles(); pre.reset();
+                work.getChildFile ("pre.wav").deleteFile();
+
+                // never overwrite an earlier result: number it
+                const juce::String ext = flac ? "flac" : "wav";
+                const juce::String stem = f.getFileNameWithoutExtension() + " - podcast ready";
+                juce::File dest = outDir.getChildFile (stem + "." + ext);
+                for (int k = 2; dest.exists() && k < 1000; ++k) dest = outDir.getChildFile (stem + " (" + juce::String (k) + ")." + ext);
+                bool cancelled = false;
+                if (! writeStoreToFile (*outS, dest, rate, bitDepth, slice (0.85f, 1.f), err, cancelled)) return;
+                resultLine = juce::String::formatted ("%s  ->  %.1f LUFS, true peak %.1f dB", dest.getFileName().toRawUTF8(), rep.after.lufs, rep.after.truePeakDb);
+                ok = true;
+            }();
+            work.deleteRecursively();
+            if (cancelFlag.load()) { stateV.store (Idle); setMessage ("Batch cancelled."); if (onWake) onWake(); return; }
+            {
+                const juce::ScopedLock sl (lockInfo);
+                if (ok) { ++batchV.done; batchV.log.add (resultLine); }
+                else    { ++batchV.failed; batchV.log.add (f.getFileName() + "  ->  skipped: " + err); }
+            }
+            if (onWake) onWake();
+        }
+        BatchStatus b = batchStatus();
+        {
+            const juce::ScopedLock sl (lockInfo);
+            batchV.finished = true; batchV.current.clear();
+        }
+        setMessage (juce::String::formatted ("Batch finished: %d done, %d skipped. Files are in %s", b.done, b.failed, outDir.getFullPathName().toRawUTF8()));
         progressV.store (1.f);
         stateV.store (Idle);
         if (onWake) onWake();

@@ -358,6 +358,12 @@ inline Layout createLayout()
     addF (l, "pcTarget",   "Podcast Loudness Target", -24.f, -12.f, -16.f, 0.f, 0.5f, "LUFS");
     addF (l, "pcCeil",     "Podcast Peak Ceiling", -6.f, -0.1f, -1.f, 0.f, 0.1f, "dBTP");
     addB (l, "pcMono",     "Podcast Mono Output", false);
+    addF (l, "pcLowCut",   "Podcast Low Cut", 0.f, 300.f, 0.f, 0.f, 5.f, "Hz");
+    addF (l, "pcEcho",     "Podcast Echo Reduction", 0.f, 100.f, 0.f, 0.f, 1.f, "%");
+    addF (l, "pcWarmth",   "Podcast Warmth", 0.f, 100.f, 0.f, 0.f, 1.f, "%");
+    addB (l, "pcSpkOn",    "Podcast Per-Speaker Processing", true);
+    addF (l, "pcSpkBal",   "Podcast Speaker Balance", 0.f, 100.f, 70.f, 0.f, 1.f, "%");
+    addF (l, "pcSpkCount", "Podcast Speaker Count", 0.f, 4.f, 0.f, 0.f, 1.f, "");
 
     return l;
 }

@@ -545,6 +545,20 @@ AIOEditor::AIOEditor (AIOProcessor& p) : AudioProcessorEditor (&p), proc (p)
 {
     setLookAndFeel (&laf);
 
+#if AIO_AUDIO_SAUCE
+    // Audio Sauce: only the PODCAST READY screen, with its own header
+    podcastPanel = std::make_unique<PodcastPanel> (p);
+    panels = { podcastPanel.get() };
+    podcastTab = 0;
+    addAndMakeVisible (podcastPanel.get());
+    addAndMakeVisible (outMeter);
+    setResizable (true, true);
+    setResizeLimits (1180, 690, 1700, 1100);
+    setSize (1180, 690);
+    startTimerHz (30);
+    return;
+#endif
+
     tune    = std::make_unique<TunePanel> (p);
     eqPanel = std::make_unique<EQPanel> (p);
     dyn     = std::make_unique<DynPanel> (p);
@@ -660,6 +674,18 @@ void AIOEditor::timerCallback()
 void AIOEditor::paint (juce::Graphics& g)
 {
     g.fillAll (col::bg);
+#if AIO_AUDIO_SAUCE
+    g.setColour (col::text);
+    g.setFont (juce::Font (juce::FontOptions (26.f, juce::Font::bold)));
+    g.drawText ("AUDIO SAUCE", 20, 12, 300, 32, juce::Justification::centredLeft);
+    g.setColour (juce::Colour (0xff5ec8ff));
+    g.fillRoundedRectangle (20.f, 48.f, 48.f, 3.f, 1.5f);
+    g.setColour (col::dim);
+    g.setFont (juce::Font (juce::FontOptions (12.f)));
+    g.drawText ("clean up any voice recording: noise, levels, clipping, several speakers in one file", 20, 56, 640, 16, juce::Justification::centredLeft);
+    g.drawText ("output", getWidth() - 76, 8, 60, 14, juce::Justification::centredRight);
+    return;
+#endif
     g.setColour (col::text);
     g.setFont (juce::Font (juce::FontOptions (26.f, juce::Font::bold)));
     g.drawText ("AIO STUDIO", 20, 14, 240, 32, juce::Justification::centredLeft);
@@ -676,6 +702,15 @@ void AIOEditor::paint (juce::Graphics& g)
 
 void AIOEditor::resized()
 {
+#if AIO_AUDIO_SAUCE
+    {
+        auto b = getLocalBounds();
+        auto top = b.removeFromTop (80);
+        outMeter.setBounds (top.getRight() - 28, 26, 12, 44);
+        podcastPanel->setBounds (b.reduced (16, 0).withTrimmedBottom (14));
+        return;
+    }
+#endif
     auto b = getLocalBounds();
     auto top = b.removeFromTop (92).reduced (16, 6);
 

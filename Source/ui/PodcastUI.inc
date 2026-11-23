@@ -4,7 +4,7 @@
 #include "../podcast/MediaDecode.h"
 namespace { const juce::Colour podCol { 0xff5ec8ff }; }      // sky blue
 
-class AIOEditor::PodcastPanel : public AIOEditor::PanelBase, private juce::Timer
+class AIOEditor::PodcastPanel : public AIOEditor::PanelBase, public juce::FileDragAndDropTarget, private juce::Timer
 {
 public:
     explicit PodcastPanel (AIOProcessor& p)
@@ -18,7 +18,7 @@ public:
           tDeclip (p.apvts, "pcDeclip", "Repair clipping", podCol), tMono (p.apvts, "pcMono", "Mono output", podCol),
           tSpk (p.apvts, "pcSpkOn", "Per voice", podCol)
     {
-        loadBtn.setButtonText ("Load audio or video (WAV, MP3, MP4, MOV...)");
+        loadBtn.setButtonText ("Load audio or video (or drop a file here)");
         batchBtn.setButtonText ("Batch...");
         batchBtn.setTooltip ("Pick several recordings or video clips: each one is cleaned with the current settings and saved into a folder you choose.");
         voiceBox.addItem ("Voices: auto", 1); voiceBox.addItem ("1 voice", 2); voiceBox.addItem ("2 voices", 3); voiceBox.addItem ("3 voices", 4); voiceBox.addItem ("4 voices", 5);
@@ -176,6 +176,17 @@ public:
         hint.setBounds (notes.reduced (16, 30).removeFromBottom (110));
     }
 
+    // drop a recording or a video clip onto the window to load it
+    bool isInterestedInFileDrag (const juce::StringArray& files) override
+    {
+        return files.size() == 1 && ! proc.getPodcast().busy();
+    }
+    void filesDropped (const juce::StringArray& files, int, int) override
+    {
+        const juce::File f (files[0]);
+        if (f.existsAsFile() && ! proc.getPodcast().busy()) loadDropped (f);
+    }
+
     void mouseDown (const juce::MouseEvent& e) override
     {
         if (tlRect.expanded (0, 3).contains (e.getPosition()) && info.hasFile && info.voiceCount >= 2 && ! proc.getPodcast().busy())
@@ -194,6 +205,13 @@ private:
         auto p = e.getPosition();
         if (! waveRect.expanded (4, 4).contains (p) || ! info.hasFile) return;
         proc.getPodcast().seek ((double) (p.x - waveRect.getX()) / (double) std::max (1, waveRect.getWidth()));
+    }
+
+    void loadDropped (const juce::File& f)
+    {
+        proc.getPodcast().setPlaying (false);
+        statusNote.clear();
+        proc.getPodcast().loadFile (f);
     }
 
     void chooseFile()
@@ -378,7 +396,7 @@ private:
     {
         auto r = table.reduced (16, 34);
         g.setFont (juce::Font (juce::FontOptions (13.f)));
-        const int c1 = r.getX() + 210, c2 = r.getX() + 320, rowH = 24;
+        const int c1 = r.getX() + 180, c2 = r.getX() + 286, rowH = 24;
         int y = r.getY();
         g.setColour (col::dim);
         g.drawText ("Before", c1, y, 100, rowH, juce::Justification::centredRight);
@@ -388,7 +406,7 @@ private:
         const auto& B = info.before; const auto& A = info.report.after;
         auto row = [&] (const juce::String& name, const juce::String& a, const juce::String& b, bool good)
         {
-            g.setColour (col::dim);  g.drawText (name, r.getX(), y, 210, rowH, juce::Justification::centredLeft);
+            g.setColour (col::dim);  g.drawText (name, r.getX(), y, 180, rowH, juce::Justification::centredLeft);
             g.setColour (col::text); g.drawText (a, c1, y, 100, rowH, juce::Justification::centredRight);
             g.setColour (good ? podCol : col::text); g.drawText (b, c2, y, 100, rowH, juce::Justification::centredRight);
             y += rowH;

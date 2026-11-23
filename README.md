@@ -47,6 +47,10 @@ No Visual Studio on your PC? Push this folder to a GitHub repository: the includ
 2. FL Studio -> *Options -> Manage plugins* -> *Find installed plugins* (Verify plugins).
 3. Add via the mixer insert slot (AIO Studio) or the channel rack *+* (AIO Studio Instrument).
 
+## Audio Sauce (stand-alone app)
+
+`AudioSauce` is the PODCAST READY screen on its own, as a normal Windows / Mac app: no FL Studio needed. It is built from the same sources, so it sounds identical to the plug-in. Drop a recording or video onto the window (or press Load), pick a starting point, press PLAY (the knobs change the sound live), press MAKE PODCAST READY, then Export or run a Batch. Settings are remembered between runs; *Options* (top left) picks the speakers. Build it with `cmake --build build --target AudioSauce_Standalone`; CI uploads it as the `Audio-Sauce-Windows` / `Audio-Sauce-macOS` artifacts. It is not code-signed, so Windows SmartScreen asks once ("More info" -> "Run anyway").
+
 ## Tests
 
 ```

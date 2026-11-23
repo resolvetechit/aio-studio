@@ -20,10 +20,12 @@ jobs:
             os: windows-latest
             extra: ""
             artifact: AIO-Studio-Windows-VST3
+            sauce: Audio-Sauce-Windows
           - name: macOS (Universal)
             os: macos-latest
             extra: -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
             artifact: AIO-Studio-macOS-VST3
+            sauce: Audio-Sauce-macOS
 
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +35,27 @@ jobs:
 
       - name: Build plugins
         run: cmake --build build --config Release --parallel --target AIOStudio_VST3 AIOStudioInstrument_VST3
+
+      - name: Build Audio Sauce (stand-alone app)
+        run: cmake --build build --config Release --parallel --target AudioSauce_Standalone
+
+      - name: Collect Audio Sauce
+        shell: bash
+        run: |
+          mkdir -p sauce
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "$(find build -type f -name 'Audio Sauce.exe' | head -1)" sauce/
+            cp assets/audio-sauce-readme.txt sauce/README.txt
+          else
+            app="$(find build -type d -name 'Audio Sauce.app' | head -1)"
+            ditto -c -k --keepParent "$app" sauce/Audio-Sauce.zip
+          fi
+          ls -la sauce
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.sauce }}
+          path: sauce
 
       - name: Build and run tests
         shell: bash
@@ -63,5 +86,7 @@ jobs:
           cd ..
           gh release create "${GITHUB_REF_NAME}" --generate-notes 2>/dev/null || true
           gh release upload "${GITHUB_REF_NAME}" ${{ matrix.artifact }}.zip --clobber
+          (cd sauce && 7z a ../${{ matrix.sauce }}.zip . >/dev/null 2>&1 || zip -r ../${{ matrix.sauce }}.zip .)
+          gh release upload "${GITHUB_REF_NAME}" ${{ matrix.sauce }}.zip --clobber
         env:
           GH_TOKEN: ${{ github.token }}

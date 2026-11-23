@@ -29,8 +29,8 @@ struct AIOProcessor::Tx
 AIOProcessor::BusesProperties AIOProcessor::makeBuses()
 {
     BusesProperties b;
-#if JucePlugin_IsSynth
-    return b.withOutput ("Output", juce::AudioChannelSet::stereo(), true);
+#if JucePlugin_IsSynth || AIO_AUDIO_SAUCE
+    return b.withOutput ("Output", juce::AudioChannelSet::stereo(), true);      // Audio Sauce plays files only: no input, so the app never asks for a microphone
 #else
     return b.withInput ("Input", juce::AudioChannelSet::stereo(), true)
             .withOutput ("Output", juce::AudioChannelSet::stereo(), true);
@@ -73,7 +73,7 @@ AIOProcessor::~AIOProcessor()
 bool AIOProcessor::isBusesLayoutSupported (const BusesLayout& l) const
 {
     if (l.getMainOutputChannelSet() != juce::AudioChannelSet::stereo()) return false;
-#if JucePlugin_IsSynth
+#if JucePlugin_IsSynth || AIO_AUDIO_SAUCE
     return true;
 #else
     return l.getMainInputChannelSet() == juce::AudioChannelSet::stereo();
@@ -544,7 +544,7 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
         if (e.kind >= 0 && tbEvN < (int) tbEv.size()) tbEv[(size_t) tbEvN++] = e;
     }
 
-#if JucePlugin_IsSynth
+#if JucePlugin_IsSynth || AIO_AUDIO_SAUCE
     buffer.clear();
     midi.clear();
 #endif

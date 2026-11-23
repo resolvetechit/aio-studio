@@ -106,6 +106,32 @@ target_compile_definitions(AIOStudioInstrument PUBLIC ${AIO_DEFS})
 target_link_libraries(AIOStudioInstrument PRIVATE ${AIO_LIBS})
 
 # ---------------------------------------------------------------------------
+# 3) Audio Sauce - stand-alone app: just the PODCAST READY screen (same engine),
+#    so a recording can be cleaned up without opening FL Studio.
+#    Built as the "Standalone" format of an effect with no audio input.
+# ---------------------------------------------------------------------------
+option(AIO_BUILD_AUDIO_SAUCE "Build the Audio Sauce stand-alone app" ON)
+if(AIO_BUILD_AUDIO_SAUCE)
+    juce_add_plugin(AudioSauce
+        COMPANY_NAME "JC Creative Holdings"
+        BUNDLE_ID com.jccreativeholdings.audiosauce
+        PLUGIN_MANUFACTURER_CODE JcCr
+        PLUGIN_CODE AuSa
+        FORMATS Standalone
+        PRODUCT_NAME "Audio Sauce"
+        IS_SYNTH FALSE
+        NEEDS_MIDI_INPUT FALSE
+        NEEDS_MIDI_OUTPUT FALSE
+        ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/audio-sauce-icon.png"
+        VERSION 1.0.0)
+    target_sources(AudioSauce PRIVATE ${AIO_SOURCES})
+    target_include_directories(AudioSauce PRIVATE Source)
+    target_compile_definitions(AudioSauce PUBLIC ${AIO_DEFS} AIO_AUDIO_SAUCE=1
+        JUCE_USE_WIN_WEBVIEW2_WITH_STATIC_LINKING=0)
+    target_link_libraries(AudioSauce PRIVATE ${AIO_LIBS})
+endif()
+
+# ---------------------------------------------------------------------------
 # Offline tests (no audio device needed)
 # ---------------------------------------------------------------------------
 if(AIO_BUILD_TESTS)

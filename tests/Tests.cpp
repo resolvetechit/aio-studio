@@ -1589,7 +1589,7 @@ int main (int argc, char** argv)
     }
     if (argc > 1 && juce::String (argv[1]) == "--podcast")
     {
-        testPodcastDSP(); testPodcastSession(); testPodcastUI();
+        testPodcastDSP(); testPodcastSmooth(); testPodcastSession(); testPodcastLive(); testPodcastUI();
         std::printf ("\n%d checks, %d failed\n", checks, failures);
         return failures == 0 ? 0 : 1;
     }
@@ -1625,7 +1625,9 @@ int main (int argc, char** argv)
     testLayerProcessor();
     testLayerUI();
     testPodcastDSP();
+    testPodcastSmooth();
     testPodcastSession();
+    testPodcastLive();
     testPodcastUI();
     std::printf ("\n%d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

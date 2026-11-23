@@ -444,9 +444,11 @@ private:
     {
         for (int i = 0; i < kN; ++i)
         {
-            fx[(size_t) 2 * i] = frL[(size_t) i] * win[(size_t) i]; fx[(size_t) 2 * i + 1] = 0.f;
-            if (stereo) { fy[(size_t) 2 * i] = frR[(size_t) i] * win[(size_t) i]; fy[(size_t) 2 * i + 1] = 0.f; }
+            fx[(size_t) i] = frL[(size_t) i] * win[(size_t) i];           // JUCE wants the N real samples contiguously in the first half
+            if (stereo) fy[(size_t) i] = frR[(size_t) i] * win[(size_t) i];
         }
+        std::fill (fx.begin() + kN, fx.end(), 0.f);
+        if (stereo) std::fill (fy.begin() + kN, fy.end(), 0.f);
         fft.performRealOnlyForwardTransform (fx.data(), true);
         if (stereo) fft.performRealOnlyForwardTransform (fy.data(), true);
 
@@ -476,7 +478,7 @@ private:
             }
             d[1] = 0.f; d[(size_t) 2 * (kN / 2) + 1] = 0.f;
             fft.performRealOnlyInverseTransform (d.data());
-            for (int i = 0; i < kN; ++i) acc[(size_t) i] += d[(size_t) 2 * i] * win[(size_t) i];       // JUCE's real FFT pair has a gain of 0.5, sine^2 at 75 % overlap sums to 2
+            for (int i = 0; i < kN; ++i) acc[(size_t) i] += 0.5f * d[(size_t) i] * win[(size_t) i];   // the FFT pair is exact (gain 1); sine^2 at 75 % overlap sums to 2
         };
         finishCh (fx, accL);
         if (stereo) finishCh (fy, accR);
@@ -676,7 +678,7 @@ Analysis analyse (const ReadFn& src, long long len, double sr, const Progress& p
                 if (nextK < nFrames && chosen[(size_t) nextK])
                 {
                     const size_t off = (size_t) ((nextK - 3) * kH - histStart);
-                    for (int i = 0; i < kN; ++i) { fx[(size_t) 2 * i] = hist[off + (size_t) i] * win[(size_t) i]; fx[(size_t) 2 * i + 1] = 0.f; }
+                    { for (int i = 0; i < kN; ++i) fx[(size_t) i] = hist[off + (size_t) i] * win[(size_t) i]; std::fill (fx.begin() + kN, fx.end(), 0.f); }
                     fft.performRealOnlyForwardTransform (fx.data(), true);
                     for (int b = 0; b < kB; ++b) psd[(size_t) b] += (double) fx[(size_t) 2 * b] * fx[(size_t) 2 * b] + (double) fx[(size_t) 2 * b + 1] * fx[(size_t) 2 * b + 1];
                     ++used;
@@ -752,9 +754,11 @@ bool processStream (const ReadFn& src, long long len, double sr, bool dual, cons
         }
         else { eL = dL; eR = dR; }
         // 4. Auto Voice, speech mode
-        for (size_t off2 = 0; off2 < eL.size(); off2 += 4096)
+        // (Auto Voice applies its tone EQ per call with the settings it holds at the end of the call, so it has to be fed in short pieces,
+        //  like a plug-in host would: long pieces make the EQ jump at every piece boundary, which is an audible click.)
+        for (size_t off2 = 0; off2 < eL.size(); off2 += 32)
         {
-            const int k = (int) std::min<size_t> (4096, eL.size() - off2);
+            const int k = (int) std::min<size_t> (32, eL.size() - off2);
             av.process (eL.data() + off2, eR.data() + off2, k, vs);
         }
         if (! eL.empty()) { lm.push (eL.data(), eR.data(), (int) eL.size()); pre.append (eL.data(), eR.data(), (int) eL.size()); }
@@ -809,6 +813,105 @@ bool processStream (const ReadFn& src, long long len, double sr, bool dual, cons
     }
     rep.reachedTarget = std::abs (rep.after.lufs - (double) o.targetLufs) < 0.6;
     return P (1.f);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+struct LiveChain::Impl
+{
+    std::shared_ptr<const Analysis> an;
+    Options o;
+    double sr;
+    bool dual, doDeclip, stereoDn;
+    ClipInfo off;
+    DeclipStream dcL, dcR;
+    bool eased = false;
+    StftDenoiser dn;
+    AutoVoice av;
+    VoxSettings vs;
+    LoudnessMeter lm;
+    LookaheadLimiter lim;
+    int limSkip = 0;
+    double gainDb, gainLin;
+    long long heard = 0;
+    std::vector<float> l, r, dL, dR, eL, eR;
+
+    Impl (std::shared_ptr<const Analysis> a, const Options& opt, double rate, bool dualSource, double g0)
+        : an (std::move (a)), o (opt), sr (rate), dual (dualSource),
+          doDeclip (opt.declip && an != nullptr && (an->clip[0].on || (dualSource && an->clip[1].on))),
+          stereoDn (dualSource && ! opt.mono),
+          dcL (doDeclip ? an->clip[0] : off), dcR (doDeclip && dualSource ? an->clip[1] : off),
+          dn (an->noise, opt.denoise, dualSource && ! opt.mono, eased),
+          gainDb (g0), gainLin (std::pow (10.0, g0 / 20.0))
+    {
+        av.prepare (sr);
+        vs.on = true; vs.mode = VoxSpeech;
+        vs.level = o.level; vs.tone = o.tone; vs.deess = o.deess; vs.comp = o.comp;
+        vs.clean = 0.25f * o.denoise; vs.targetDb = -20.f;
+        lm.prepare (sr);
+        lim.prepare (sr);
+        limSkip = lim.getLatency();
+    }
+};
+
+LiveChain::LiveChain (std::shared_ptr<const Analysis> a, const Options& o, double sampleRate, bool dualSource, double initialGainDb)
+    : p (std::make_unique<Impl> (std::move (a), o, sampleRate, dualSource, initialGainDb)) {}
+LiveChain::~LiveChain() = default;
+double LiveChain::gainDb() const { return p->gainDb; }
+const Options& LiveChain::options() const { return p->o; }
+
+void LiveChain::push (const float* inL, const float* inR, int n, std::vector<float>& outL, std::vector<float>& outR)
+{
+    auto& s = *p;
+    // 1. declip
+    if (s.doDeclip)
+    {
+        s.dcL.push (inL, n); s.dcL.scan (false);
+        size_t m = s.dcL.ready();
+        if (s.dual) { s.dcR.push (inR, n); s.dcR.scan (false); m = std::min (m, s.dcR.ready()); }
+        s.dL.resize (m); s.dcL.pop (s.dL.data(), m);
+        if (s.dual) { s.dR.resize (m); s.dcR.pop (s.dR.data(), m); } else s.dR = s.dL;
+    }
+    else { s.dL.assign (inL, inL + n); s.dR.assign (s.dual ? inR : inL, (s.dual ? inR : inL) + n); }
+    // 2. mono fold
+    if (s.o.mono && s.dual) for (size_t i = 0; i < s.dL.size(); ++i) { const float m = 0.5f * (s.dL[i] + s.dR[i]); s.dL[i] = s.dR[i] = m; }
+    // 3. denoise
+    if (s.dn.active())
+    {
+        s.eL.clear(); s.eR.clear();
+        s.dn.process (s.dL.data(), s.dR.data(), (int) s.dL.size(), s.eL, s.eR);
+    }
+    else { s.eL = s.dL; s.eR = s.dR; }
+    if (s.eL.empty()) return;
+    // 4. Auto Voice (short pieces, see processStream)
+    for (size_t off2 = 0; off2 < s.eL.size(); off2 += 32)
+        s.av.process (s.eL.data() + off2, s.eR.data() + off2, (int) std::min<size_t> (32, s.eL.size() - off2), s.vs);
+    const int m = (int) s.eL.size();
+    s.lm.push (s.eL.data(), s.eR.data(), m);
+    // 5. gain: follows what the loudness meter has heard (after the first few seconds), a couple of dB per second at most
+    s.heard += m;
+    const double g0 = s.gainLin;
+    if ((double) s.heard > 1.5 * s.sr)
+    {
+        const double heardLufs = s.lm.integrated();
+        if (heardLufs > -69.0)
+        {
+            const double want = std::clamp ((double) s.o.targetLufs - heardLufs, -30.0, 40.0);
+            const double step = (std::abs (want - s.gainDb) > 4.0 ? 8.0 : 2.5) * (double) m / s.sr;      // quick when it is far off (a changed target), gentle once close
+            s.gainDb += std::clamp (want - s.gainDb, -step, step);
+        }
+    }
+    s.gainLin = std::pow (10.0, s.gainDb / 20.0);
+    for (int i = 0; i < m; ++i)
+    {
+        const double g = g0 + (s.gainLin - g0) * (double) (i + 1) / (double) m;
+        s.eL[(size_t) i] = (float) (s.eL[(size_t) i] * g); s.eR[(size_t) i] = (float) (s.eR[(size_t) i] * g);
+    }
+    // 6. limiter (it delays by its look-ahead; the first frames out of it are its empty delay line)
+    s.lim.process (s.eL.data(), s.eR.data(), m, s.o.ceilingDb);
+    int from = 0;
+    if (s.limSkip > 0) { from = std::min (m, s.limSkip); s.limSkip -= from; }
+    outL.insert (outL.end(), s.eL.begin() + from, s.eL.end());
+    outR.insert (outR.end(), s.eR.begin() + from, s.eR.end());
 }
 
 // ---------------------------------------------------------------------------------------------------------------

@@ -41,6 +41,7 @@ AIOProcessor::AIOProcessor()
     : AudioProcessor (makeBuses()),
       apvts (*this, nullptr, "AIO_STATE", createLayout())
 {
+    podcast.getOptions = [this] { return readPodcastOptions(); };
     for (auto* p : getParameters())
         if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (p))
         {
@@ -580,6 +581,7 @@ void AIOProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuf
     // ---------------------------------------------------------------- parameters, once per block
     const ChainParams cpFull = readChainParams (bpm);
 
+    podcast.setLiveOptions (readPodcastOptions());                       // the Podcast Ready preview follows the knobs while it plays
     const bool podMode = ! master.isPlaying() && podcast.isPlaying();      // Podcast Ready preview: the file replaces the input, the chain is bypassed
     const bool fileMode = master.isPlaying() || podMode;
     const ChainParams cp = fileMode ? cpFull.masterOnly() : cpFull;

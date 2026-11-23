@@ -38,6 +38,7 @@ public:
     ~PodcastSession();
 
     std::function<void()> onWake;
+    std::function<podcast::Options()> getOptions;       // supplied by the processor: the current knob settings (so the live preview is ready as soon as a file loads)
 
     // ---- message thread
     void loadFile (const juce::File&);
@@ -60,6 +61,12 @@ public:
     void readPlayback (float* l, float* r, int n);
     int  bufferedMs() const;                 // how much audio the player has ready (for tests and the UI)
     int  underruns() const;
+    // ---- live preview: the knobs act on the playing audio (the real chain runs on the fly). The exact whole-file run is still what gets exported.
+    void setLiveOptions (const podcast::Options&);      // any thread (cheap, lock-free)
+    void setLive (bool on);
+    bool live() const;                                   // the LIVE switch
+    bool liveActive() const;                             // live and ready (a file is loaded and options were supplied)
+    float liveGainDb() const;
     std::atomic<bool> abOriginal { false };
     std::atomic<bool> matchVolume { true };
     std::atomic<bool> loop { true };
@@ -69,6 +76,7 @@ private:
     class Job;
     void startJob (int initialState, std::function<void()> fn);
     void setMessage (const juce::String& m);
+    void refreshMatchGain();
     void clearTemp();
 
     juce::AudioFormatManager formats;
@@ -88,7 +96,8 @@ private:
 
     std::unique_ptr<PodcastPlayer> player;
     std::atomic<bool> playing { false };
-    std::atomic<float> matchGainLin { 1.f };
+    std::atomic<float> matchGainLin { 1.f }, fileMatchGain { 1.f }, beforeLufs { -23.f }, beforePeak { -3.f }, liveTarget { -16.f };
+    static constexpr bool liveDefault = true;
     std::atomic<bool> resultPlayable { false };
     double hostSrCache = 44100.0;
 };

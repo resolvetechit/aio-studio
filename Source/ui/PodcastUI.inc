@@ -22,6 +22,10 @@ public:
         loopBtn.setButtonText ("LOOP");
         loopBtn.setToggleState (true, juce::dontSendNotification);
         loopBtn.setColour (juce::ToggleButton::tickColourId, podCol);
+        liveBtn.setButtonText ("LIVE");
+        liveBtn.setToggleState (true, juce::dontSendNotification);
+        liveBtn.setColour (juce::ToggleButton::tickColourId, podCol);
+        liveBtn.setTooltip ("Hear the knobs working while it plays (about half a second after you move one). Turn off to hear the finished render instead.");
         matchBtn.setButtonText ("MATCH VOLUME");
         matchBtn.setToggleState (true, juce::dontSendNotification);
         matchBtn.setColour (juce::ToggleButton::tickColourId, podCol);
@@ -33,7 +37,7 @@ public:
         preset.setTextWhenNothingSelected ("Starting point...");
         preset.onChange = [this] { if (preset.getSelectedId() > 0) proc.applyPodcastPreset (preset.getSelectedId() - 1); };
 
-        hint.setText ("Load a whole recording, pick a starting point, press MAKE PODCAST READY. It repairs clipped peaks, learns the background noise from your pauses and removes it, evens out loud and quiet words, then sets the loudness and holds the peaks. Press PLAY to hear it, flip HEAR to compare with your original, then Export.", juce::dontSendNotification);
+        hint.setText ("Load a whole recording and press PLAY: with LIVE on you hear the clean-up straight away and every knob you move changes the sound while it plays. Flip HEAR to compare with your original. When it sounds right, press MAKE PODCAST READY (an exact pass over the whole file, which also lands the loudness precisely) and then Export. LIVE learns from where you are listening, so the final pass can differ slightly.", juce::dontSendNotification);
         hint.setFont (juce::Font (juce::FontOptions (12.f)));
         hint.setColour (juce::Label::textColourId, col::dim);
         hint.setJustificationType (juce::Justification::topLeft);
@@ -48,6 +52,13 @@ public:
             pc.setPlaying (! pc.isPlaying());
         };
         loopBtn.onClick = [this] { proc.getPodcast().loop = loopBtn.getToggleState(); };
+        liveBtn.onClick = [this]
+        {
+            auto& pc = proc.getPodcast();
+            pc.setLive (liveBtn.getToggleState());
+            if (! liveBtn.getToggleState() && ! info.hasResult) statusNote = "LIVE is off: press MAKE PODCAST READY to render, then PLAY to hear the result.";
+            else statusNote.clear();
+        };
         matchBtn.onClick = [this] { proc.getPodcast().matchVolume = matchBtn.getToggleState(); };
         abBtn.onClick = [this]
         {
@@ -58,7 +69,7 @@ public:
         };
 
         for (auto* c : std::initializer_list<juce::Component*> { &kDenoise, &kLevel, &kTone, &kDeEss, &kComp, &kTarget, &kCeil, &tDeclip, &tMono,
-                                                                  &loadBtn, &runBtn, &exportBtn, &fmt, &preset, &playBtn, &abBtn, &loopBtn, &matchBtn, &hint })
+                                                                  &loadBtn, &runBtn, &exportBtn, &fmt, &preset, &playBtn, &abBtn, &loopBtn, &liveBtn, &matchBtn, &hint })
             addAndMakeVisible (c);
         startTimerHz (20);
     }
@@ -133,6 +144,7 @@ public:
         waveRect = w.withTrimmedBottom (6);
         playBtn.setBounds (tr.removeFromLeft (84)); tr.removeFromLeft (6);
         loopBtn.setBounds (tr.removeFromLeft (64)); tr.removeFromLeft (6);
+        liveBtn.setBounds (tr.removeFromLeft (64)); tr.removeFromLeft (6);
         abBtn.setBounds (tr.removeFromLeft (190)); tr.removeFromLeft (6);
         matchBtn.setBounds (tr.removeFromLeft (130));
 
@@ -197,8 +209,11 @@ private:
         exportBtn.setEnabled (info.hasResult && ! busy);
         playBtn.setEnabled (info.hasFile && ! busy);
         loadBtn.setEnabled (! busy);
-        abBtn.setEnabled (info.hasResult);
-        matchBtn.setEnabled (info.hasResult);
+        const bool canHear = info.hasResult || pc.liveActive();
+        abBtn.setEnabled (canHear);
+        matchBtn.setEnabled (canHear);
+        if (info.hasFile) pc.setLiveOptions (proc.readPodcastOptions());          // the knobs drive the live preview even before anything is playing
+        if (liveBtn.getToggleState() != pc.live()) liveBtn.setToggleState (pc.live(), juce::dontSendNotification);
         playBtn.setButtonText (pc.isPlaying() ? "STOP" : "PLAY");
         if (isShowing()) repaint();
     }
@@ -316,7 +331,7 @@ private:
     Knob kDenoise, kLevel, kTone, kDeEss, kComp, kTarget, kCeil;
     Toggle tDeclip, tMono;
     juce::TextButton loadBtn, runBtn, exportBtn, playBtn, abBtn;
-    juce::ToggleButton loopBtn, matchBtn;
+    juce::ToggleButton loopBtn, liveBtn, matchBtn;
     juce::ComboBox fmt, preset;
     juce::Label hint;
     juce::Rectangle<int> left, wave, table, notes, fileInfoRect, progressRect, waveRect;

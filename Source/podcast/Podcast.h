@@ -110,6 +110,23 @@ void scanClipping (const ReadFn& src, long long len, const Progress& prog, ClipI
 bool processStream (const ReadFn& src, long long len, double sr, bool dual, const Analysis& a, const Options& o,
                     Store& pre, Store& out, Report& rep, std::vector<float>* waveformAfter, const Progress& prog, int chunkFrames = 1 << 16);
 
+// ---- live preview: the same chain, run on the fly. Feed source frames in order; the output is aligned with the input
+//      (output frame i = source frame i), arrives with some latency (so push() may return fewer frames than it was given),
+//      and is levelled to the target by a slowly-moving gain estimated from what it has heard so far, then limited.
+//      It is an approximation of the final run (which sees the whole file); the player warms it up for a few seconds first.
+class LiveChain
+{
+public:
+    LiveChain (std::shared_ptr<const Analysis> analysis, const Options& o, double sampleRate, bool dualSource, double initialGainDb);
+    ~LiveChain();
+    void push (const float* l, const float* r, int n, std::vector<float>& outL, std::vector<float>& outR);
+    double gainDb() const;
+    const Options& options() const;
+private:
+    struct Impl;
+    std::unique_ptr<Impl> p;
+};
+
 // ---- in-memory helpers (the same code, with RAM stores)
 Stats measure (const float* l, const float* r, size_t n, double sr);
 long long countClipped (const float* x, size_t n);

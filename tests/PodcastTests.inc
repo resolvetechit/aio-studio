@@ -363,7 +363,8 @@ static void testPodcastSession()
     CHECK (i.report.declipped > 100 && i.report.after.clipped == 0, "clipping repaired (%lld samples rebuilt, %lld left flat)", i.report.declipped, i.report.after.clipped);
     CHECK (i.waveformAfter.size() == i.waveform.size(), "both waveforms are available");
 
-    // ---- audition through processBlock
+    // ---- audition the rendered result through processBlock (the LIVE preview has its own tests below)
+    pc.setLive (false);
     auto play = [&] (bool original, bool match, double& rms, float& peak)
     {
         pc.abOriginal = original; pc.matchVolume = match; pc.loop = true;
@@ -469,6 +470,45 @@ static void testPodcastSession()
         CHECK (std::abs (q.position() - 0.5) < 0.01 && pos0 >= 0.0, "seeking works (%.2f)", q.position());
     }
 
+    // ---- no clicks in the preview when the file and the host run at different sample rates
+    {
+        for (const double fileSr : { 44100.0, 48000.0, 96000.0, 22050.0 })
+        {
+            auto dir2 = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("aio_podcast_test");
+            auto sine = dir2.getChildFile ("sine.wav"); sine.deleteFile();
+            {
+                juce::AudioBuffer<float> b (1, (int) (fileSr * 20.0));
+                for (int k = 0; k < b.getNumSamples(); ++k) b.setSample (0, k, 0.5f * std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * k / fileSr) * (0.6f + 0.4f * std::sin (k * 3.0e-5f)));
+                juce::WavAudioFormat wav; std::unique_ptr<juce::FileOutputStream> os (sine.createOutputStream());
+                std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (os.get(), fileSr, 1, 24, {}, 0)); os.release();
+                w->writeFromAudioSampleBuffer (b, 0, b.getNumSamples());
+            }
+            AIOProcessor p5; p5.setPlayConfigDetails (2, 2, 44100.0, 512); p5.prepareToPlay (44100.0, 512);
+            auto& q = p5.getPodcast();
+            q.loadFile (sine);
+            waitFor ([&] { return ! q.busy() && q.info().hasFile; }, 20000);
+            auto roughness = [&] (bool original)
+            {
+                q.abOriginal = original; q.matchVolume = false; q.loop = true; q.seek (0.0); q.setPlaying (true);
+                std::vector<float> out; juce::AudioBuffer<float> buf (2, 512); juce::MidiBuffer m;
+                for (int b = 0; b < 400; ++b) { waitFor ([&] { return q.bufferedMs() >= 30; }, 3000); buf.clear(); if (getenv ("DIRECT")) q.readPlayback (buf.getWritePointer (0), buf.getWritePointer (1), 512); else p5.processBlock (buf, m); for (int k = 0; k < 512; ++k) out.push_back (buf.getSample (0, k)); }
+                q.setPlaying (false);
+                double e2 = 0, mx = 0; size_t cnt = 0;
+                for (size_t k = 2048; k + 1 < out.size(); ++k) { const double d = (double) out[k + 1] - 2.0 * out[k] + out[k - 1]; e2 += d * d; mx = std::max (mx, std::abs (d)); ++cnt; if (std::abs (d) > 0.05 && getenv ("DBGCLICK")) std::printf ("  click at %zu (%.4f) vals %.3f %.3f %.3f\n", k, d, out[k-1], out[k], out[k+1]); }
+                return mx / std::max (1e-12, std::sqrt (e2 / (double) cnt));
+            };
+            const double rOrig = roughness (true);
+            CHECK (rOrig < 3.0, "%.0f Hz file on a 44.1 kHz host: the original plays without clicks (peak/rms of the 2nd difference %.2f, a smooth tone is 1.4)", fileSr, rOrig);
+            p5.runPodcast();
+            waitFor ([&] { return ! q.busy(); }, 60000);
+            const double rLive = roughness (false);
+            CHECK (rLive < 6.0, "...and so does the LIVE podcast-ready preview (%.2f)", rLive);
+            q.setLive (false);
+            const double rProc = roughness (false);
+            CHECK (rProc < 6.0, "...and so does the rendered result (%.2f)", rProc);
+        }
+    }
+
     // ---- temporary files are cleaned up
     {
         auto countTemp = [] { return juce::File::getSpecialLocation (juce::File::tempDirectory).findChildFiles (juce::File::findDirectories, false, "AIOStudioPodcast_*").size(); };
@@ -531,6 +571,172 @@ static void testPodcastSession()
         juce::MemoryBlock mb; p5.getStateInformation (mb);
         AIOProcessor p6; p6.setStateInformation (mb.getData(), (int) mb.getSize());
         CHECK (std::abs (p6.apvts.getRawParameterValue ("pcDenoise")->load() - 80.f) < 0.01f, "podcast settings are saved with the project");
+    }
+}
+
+// -----------------------------------------------------------------------------------------------------------------
+// Regression: the processing itself must not add clicks (the denoiser once handed its FFT the wrong data layout, which put a step
+// at every 512-sample hop, and the tone EQ jumped at the end of every long block).
+static void testPodcastSmooth()
+{
+    std::printf ("\n== Podcast Ready: no clicks from the processing ==\n");
+    using namespace aio::podcast;
+    const double sr = 44100.0;
+    std::vector<float> x ((size_t) (sr * 20));
+    for (size_t k = 0; k < x.size(); ++k) x[k] = 0.5f * std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * (double) k / sr) * (0.6f + 0.4f * std::sin ((float) k * 3.0e-5f));
+    auto rough = [] (const std::vector<float>& y)
+    {
+        double e2 = 0, mx = 0; size_t cnt = 0;
+        for (size_t k = 4096; k + 1 < y.size(); ++k) { const double d = (double) y[k + 1] - 2.0 * y[k] + y[k - 1]; e2 += d * d; mx = std::max (mx, std::abs (d)); ++cnt; }
+        return mx / std::sqrt (e2 / (double) cnt);
+    };
+    const double r0 = rough (x);
+    auto base = [] { Options o; o.declip = false; o.denoise = 0; o.level = 0; o.tone = 0; o.deess = 0; o.comp = 0; return o; };
+    struct Case { const char* name; Options o; };
+    std::vector<Case> cases;
+    { auto o = base(); o.denoise = 0.5f; cases.push_back ({ "noise reduction", o }); }
+    { auto o = base(); o.denoise = 1.0f; cases.push_back ({ "noise reduction (100 %)", o }); }
+    { auto o = base(); o.tone = 0.7f; cases.push_back ({ "clear tone", o }); }
+    { auto o = base(); o.level = 1.f; o.comp = 0.7f; cases.push_back ({ "leveler + compression", o }); }
+    cases.push_back ({ "all defaults", Options() });
+    for (auto& c : cases)
+    {
+        auto b = toBuffer (x); Report rep; process (b, sr, c.o, rep, nullptr);
+        std::vector<float> y (b.getReadPointer (0), b.getReadPointer (0) + b.getNumSamples());
+        const double r = rough (y);
+        CHECK (r < 6.0, "%s keeps a steady tone smooth (2nd-difference peak/rms %.1f, the input has %.1f)", c.name, r, r0);
+    }
+    // speech: no sample-to-sample step stands out from its surroundings more than in the input
+    {
+        auto sp = makeSpeech (sr, 16); addNoise (sp.x, 0.004);
+        auto count = [] (const std::vector<float>& y)
+        {
+            int n = 0;
+            for (size_t k = 400; k + 400 < y.size(); ++k)
+            {
+                const double d = (double) y[k + 1] - 2.0 * y[k] + y[k - 1];
+                double e = 0; for (size_t j = k - 200; j < k + 200; j += 4) { const double dd = (double) y[j + 1] - 2.0 * y[j] + y[j - 1]; e += dd * dd; }
+                if (std::abs (d) > 12.0 * (std::sqrt (e / 100.0) + 1e-9) && std::abs (d) > 0.004) ++n;
+            }
+            return n;
+        };
+        auto b = toBuffer (sp.x); Report rep; process (b, sr, Options(), rep, nullptr);
+        std::vector<float> y (b.getReadPointer (0), b.getReadPointer (0) + b.getNumSamples());
+        CHECK (count (y) <= count (sp.x) + 2, "speech through the default chain has no stray clicks (%d, input %d)", count (y), count (sp.x));
+    }
+    // the live chain is cheap enough to run on the fly
+    {
+        auto sp = makeSpeech (sr, 40); addNoise (sp.x, 0.004);
+        auto an = std::make_shared<Analysis> (analyse ([&] (float* l, float* r, long long pos, int n) { std::copy (sp.x.begin() + pos, sp.x.begin() + pos + n, l); std::copy (sp.x.begin() + pos, sp.x.begin() + pos + n, r); return true; },
+                                                       (long long) sp.x.size(), sr, nullptr));
+        LiveChain lc (an, Options(), sr, false, 0.0);
+        std::vector<float> oL, oR;
+        const double t0 = juce::Time::getMillisecondCounterHiRes();
+        for (size_t pos = 0; pos + 2048 <= sp.x.size(); pos += 2048) lc.push (sp.x.data() + pos, sp.x.data() + pos, 2048, oL, oR);
+        const double secs = (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0;
+        const double audio = (double) oL.size() / sr;
+        CHECK (audio / secs > 8.0, "the live chain runs %.0fx faster than real time (it needs to be well above 1)", audio / secs);
+    }
+}
+
+// -----------------------------------------------------------------------------------------------------------------
+static void testPodcastLive()
+{
+    std::printf ("\n== Podcast Ready: live preview (knobs act while it plays) ==\n");
+    const double sr = 44100.0;
+    const auto in = writeTestVoice ("live_voice.wav", sr, 26, true);
+    AIOProcessor proc; proc.setPlayConfigDetails (2, 2, sr, 512); proc.prepareToPlay (sr, 512);
+    auto& pc = proc.getPodcast();
+    proc.applyPodcastPreset (0);
+    CHECK (pc.live() && ! pc.liveActive(), "LIVE is on by default, but nothing is loaded yet");
+    pc.loadFile (in);
+    waitFor ([&] { return ! pc.busy() && pc.info().hasFile; }, 20000);
+    juce::AudioBuffer<float> buf (2, 512); juce::MidiBuffer m;
+    // plays in real time and returns what came out
+    auto capture = [&] (double seconds, std::vector<float>& L, std::vector<float>& R)
+    {
+        const int blocks = (int) (seconds * sr / 512.0);
+        for (int b = 0; b < blocks; ++b)
+        {
+            const int ub = pc.underruns();
+            buf.clear(); proc.processBlock (buf, m);
+            if (pc.underruns() != ub && getenv ("DBGUR")) std::printf ("      underrun at block %d of %d (buffered %d ms, pos %.3f)\n", b, blocks, pc.bufferedMs(), pc.position());
+            for (int k = 0; k < 512; ++k) { L.push_back (buf.getSample (0, k)); R.push_back (buf.getSample (1, k)); }
+            juce::Thread::sleep (11);
+        }
+    };
+    auto lufsOf = [&] (const std::vector<float>& L, const std::vector<float>& R, size_t a, size_t b)
+    {
+        return aio::podcast::measure (L.data() + a, R.data() + a, b - a, sr).lufs;
+    };
+    pc.abOriginal = false; pc.loop = true; pc.seek (0.0);
+    pc.setPlaying (true);
+    CHECK (waitFor ([&] { return pc.liveActive() && pc.bufferedMs() > 100; }, 5000), "the live preview is ready without pressing MAKE PODCAST READY (%d ms buffered)", pc.bufferedMs());
+    std::vector<float> L, R;
+    const int u0 = pc.underruns();
+    capture (4.0, L, R);
+    const double l1 = lufsOf (L, R, (size_t) (1.0 * sr), L.size());
+    CHECK (std::abs (l1 + 16.0) < 3.0, "live preview sits near the target loudness (%.1f LUFS for -16)", l1);
+    CHECK (pc.underruns() == u0, "...and plays without a single dropout (%d)", pc.underruns() - u0);
+
+    // ---- move the target knob while it plays: -16 -> -24 LUFS. It should follow within a second or two
+    proc.setParam ("pcTarget", -24.f);
+    const size_t at = L.size();
+    capture (5.0, L, R);
+    const double early = lufsOf (L, R, at, at + (size_t) (0.4 * sr));
+    const double late = lufsOf (L, R, L.size() - (size_t) (1.5 * sr), L.size());
+    CHECK (late < l1 - 5.0 && std::abs (late + 24.0) < 3.0, "turning the target down is heard while playing: %.1f -> %.1f LUFS (target -24)", l1, late);
+    CHECK (pc.underruns() == u0, "...with no dropout while the chain was rebuilt (%d)", pc.underruns() - u0);
+    (void) early;
+
+    // ---- smoothness across the change: a sine goes through the same switch without a click
+    {
+        auto dir2 = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("aio_podcast_test");
+        auto sine = dir2.getChildFile ("live_sine.wav"); sine.deleteFile();
+        {
+            juce::AudioBuffer<float> b (1, (int) (sr * 30.0));
+            for (int k = 0; k < b.getNumSamples(); ++k) b.setSample (0, k, 0.4f * std::sin (2.0 * juce::MathConstants<double>::pi * 330.0 * k / sr));
+            juce::WavAudioFormat wav; std::unique_ptr<juce::FileOutputStream> os (sine.createOutputStream());
+            std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (os.get(), sr, 1, 24, {}, 0)); os.release();
+            w->writeFromAudioSampleBuffer (b, 0, b.getNumSamples());
+        }
+        pc.setPlaying (false);
+        proc.setParam ("pcTarget", -16.f); proc.setParam ("pcDenoise", 0.f); proc.setParam ("pcTone", 0.f); proc.setParam ("pcComp", 0.f); proc.setParam ("pcLevel", 0.f);
+        pc.loadFile (sine);
+        waitFor ([&] { return ! pc.busy() && pc.info().hasFile; }, 20000);
+        pc.abOriginal = false; pc.seek (0.0); pc.setPlaying (true);
+        const bool okw = waitFor ([&] { return pc.liveActive() && pc.bufferedMs() > 100; }, 5000);
+        if (getenv ("DBGUR")) std::printf ("      sine wait ok=%d live=%d buffered=%d state=%d msg=%s\n", (int) okw, (int) pc.liveActive(), pc.bufferedMs(), (int) pc.state(), pc.message().toRawUTF8());
+        std::vector<float> a, b2;
+        capture (2.0, a, b2);
+        std::printf ("      underruns after steady 2 s: %d\n", pc.underruns() - u0);
+        proc.setParam ("pcLevel", 100.f); proc.setParam ("pcComp", 70.f);        // chain rebuilt and cross-faded
+        capture (1.0, a, b2);
+        std::printf ("      underruns after chain swap: %d\n", pc.underruns() - u0);
+        proc.setParam ("pcTarget", -20.f);
+        capture (3.0, a, b2);
+        pc.setPlaying (false);
+        double e2 = 0, mx = 0; size_t cnt = 0, at2 = 0;
+        for (size_t k = 4096; k + 1 < a.size(); ++k) { const double d = (double) a[k + 1] - 2.0 * a[k] + a[k - 1]; e2 += d * d; if (std::abs (d) > mx) { mx = std::abs (d); at2 = k; } ++cnt; }
+        const double rough = mx / std::max (1e-12, std::sqrt (e2 / (double) cnt));
+        CHECK (rough < 12.0, "no click when the chain is swapped under a steady tone (peak/rms of the 2nd difference %.1f at %.2f s)", rough, (double) at2 / sr);
+        CHECK (pc.underruns() == u0, "...and still no dropouts (%d)", pc.underruns() - u0);
+        proc.setParam ("pcDenoise", 55.f); proc.setParam ("pcTone", 70.f); proc.setParam ("pcLevel", 100.f); proc.setParam ("pcComp", 70.f); proc.setParam ("pcTarget", -16.f);
+    }
+
+    // ---- live vs the rendered result: similar loudness
+    {
+        pc.loadFile (in);
+        waitFor ([&] { return ! pc.busy() && pc.info().hasFile; }, 20000);
+        proc.runPodcast();
+        waitFor ([&] { return ! pc.busy(); }, 120000);
+        std::vector<float> a1, b1, a2, b2;
+        pc.abOriginal = false; pc.loop = true;
+        pc.setLive (true);  pc.seek (0.2); pc.setPlaying (true); waitFor ([&] { return pc.bufferedMs() > 100; }, 5000); capture (4.0, a1, b1); pc.setPlaying (false);
+        pc.setLive (false); pc.seek (0.2); pc.setPlaying (true); waitFor ([&] { return pc.bufferedMs() > 100; }, 5000); capture (4.0, a2, b2); pc.setPlaying (false);
+        const double ll = lufsOf (a1, b1, (size_t) sr, a1.size()), lr = lufsOf (a2, b2, (size_t) sr, a2.size());
+        CHECK (std::abs (ll - lr) < 3.0, "the live preview and the final render are within 3 dB of each other (%.1f vs %.1f LUFS)", ll, lr);
+        pc.setLive (true);
     }
 }
 
